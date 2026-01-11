@@ -1,13 +1,11 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   Alert,
-  ActionSheetIOS,
   Animated,
   Easing,
   InteractionManager,
   Keyboard,
   KeyboardAvoidingView,
-  Linking,
   Platform,
   Pressable,
   ScrollView,
@@ -21,16 +19,14 @@ import DateTimePicker, { DateTimePickerEvent } from '@react-native-community/dat
 import MaterialIcons from '@expo/vector-icons/MaterialIcons';
 import { StatusBar } from 'expo-status-bar';
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import * as Location from 'expo-location';
 import * as Notifications from 'expo-notifications';
-import MapView, { Marker, Region } from 'react-native-maps';
 import { SafeAreaProvider, SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { ColorSchemeProvider, useColorScheme, useDarkModeToggle } from './hooks/use-color-scheme';
-import { GEOFENCE_TASK } from './src/location-task';
 import {
   cancelScheduleNotifications,
   DEFAULT_MESSAGE,
+  APP_NAME,
   NOTIFICATION_CATEGORY_ID,
   scheduleBatch as scheduleNotificationsBatch,
 } from './src/notifications';
@@ -40,7 +36,6 @@ import {
   Schedule,
   StoredSettings,
   QuietHours,
-  StoredLocation,
 } from './src/storage';
 
 const MIN_INTERVAL = 5;
@@ -52,8 +47,6 @@ const FONT_REGULAR = 'System';
 const FONT_MEDIUM = 'System';
 const FONT_BOLD = 'System';
 const TAB_BAR_HEIGHT = 56;
-const DEFAULT_LOCATION_RADIUS_METERS = 100;
-const LOCATION_LAST_KNOWN_MAX_AGE_MS = 30000;
 const DEFAULT_QUIET_HOURS: QuietHours = {
   enabled: false,
   startMinutesFromMidnight: 22 * 60,
@@ -62,8 +55,7 @@ const DEFAULT_QUIET_HOURS: QuietHours = {
 const ONBOARDING_KEY = 'settings.onboardingSeen';
 const NOTIFICATION_ACTION_SNOOZE_PREFIX = 'SNOOZE_';
 const NOTIFICATION_ACTION_SKIP = 'SKIP_NEXT';
-const ANYWHERE_LABEL = 'Anywhere';
-type ScheduleResult = { count: number; error?: string; skipped?: boolean };
+type ScheduleResult = { count: number; error?: string };
 
 const getDefaultNotificationName = (index: number) => `Notification ${index + 1}`;
 const normalizeDaysOfWeek = (value?: boolean[]) => {
@@ -116,8 +108,6 @@ const formatNotificationName = (value: string) => {
   return trimmed.replace(/(^\\w)|(\\s+\\w)/g, (match) => match.toUpperCase());
 };
 
-const formatLocationName = (value: string) => value.trim().replace(/\\s+/g, ' ');
-
 const createSchedule = (name: string): Schedule => ({
   id: `${Date.now()}_${Math.random().toString(16).slice(2)}`,
   name,
@@ -127,13 +117,11 @@ const createSchedule = (name: string): Schedule => ({
   daysOfWeek: DEFAULT_DAYS.slice(),
   message: '',
   isActive: false,
-  locationId: null,
 });
 
 const DEFAULT_SETTINGS: StoredSettings = {
   schedules: [createSchedule(getDefaultNotificationName(0))],
   quietHours: DEFAULT_QUIET_HOURS,
-  locationRadiusMeters: DEFAULT_LOCATION_RADIUS_METERS,
 };
 
 
@@ -149,20 +137,11 @@ function AppContent() {
   const colorScheme = useColorScheme();
   const colors = colorScheme === 'dark' ? darkColors : lightColors;
   const { isDarkMode, setDarkMode } = useDarkModeToggle();
-  const [activeTab, setActiveTab] = useState<'home' | 'settings' | 'locations'>('home');
+  const [activeTab, setActiveTab] = useState<'home' | 'settings'>('home');
   const [darkModeDraft, setDarkModeDraft] = useState(isDarkMode);
   const insets = useSafeAreaInsets();
   const [schedules, setSchedules] = useState<Schedule[]>(DEFAULT_SETTINGS.schedules);
-  const [locations, setLocations] = useState<StoredLocation[]>([]);
   const [quietHours, setQuietHours] = useState<QuietHours>(DEFAULT_QUIET_HOURS);
-  const [locationRadiusMeters, setLocationRadiusMeters] = useState(
-    DEFAULT_LOCATION_RADIUS_METERS
-  );
-  const [locationPermissionStatus, setLocationPermissionStatus] = useState<{
-    foreground: boolean;
-    background: boolean;
-  } | null>(null);
-  const [locationDebugInfo, setLocationDebugInfo] = useState<Record<string, string>>({});
   const [authorizationStatus, setAuthorizationStatus] = useState<'authorized' | 'denied' | 'unknown'>(
     'unknown'
   );
@@ -172,31 +151,14 @@ function AppContent() {
   );
   const [isNamePromptOpen, setIsNamePromptOpen] = useState(false);
   const [nameDraft, setNameDraft] = useState('');
-  const [namePromptTarget, setNamePromptTarget] = useState<'schedule' | 'location'>('schedule');
   const [namePromptMode, setNamePromptMode] = useState<'add' | 'edit'>('add');
   const [namePromptScheduleId, setNamePromptScheduleId] = useState<string | null>(null);
-  const [namePromptLocationId, setNamePromptLocationId] = useState<string | null>(null);
   const [menuScheduleId, setMenuScheduleId] = useState<string | null>(null);
-  const [menuLocationId, setMenuLocationId] = useState<string | null>(null);
-  const [pendingLocationName, setPendingLocationName] = useState<string | null>(null);
-  const [pendingLocationUpdate, setPendingLocationUpdate] = useState<{
-    id: string;
-    name: string;
-  } | null>(null);
-  const [isMapPickerOpen, setIsMapPickerOpen] = useState(false);
-  const [mapPickerRegion, setMapPickerRegion] = useState<Region | null>(null);
-  const [mapPickerCoords, setMapPickerCoords] = useState<{
-    latitude: number;
-    longitude: number;
-  } | null>(null);
   const [collapsedSchedules, setCollapsedSchedules] = useState<string[]>([]);
   const [hasSeenOvernightNotice, setHasSeenOvernightNotice] = useState(false);
   const [isOvernightNoticeLoaded, setIsOvernightNoticeLoaded] = useState(false);
   const [isHydrated, setIsHydrated] = useState(false);
   const [intervalDrafts, setIntervalDrafts] = useState<Record<string, string>>({});
-  const [locationRadiusDraft, setLocationRadiusDraft] = useState(
-    DEFAULT_LOCATION_RADIUS_METERS.toString()
-  );
   const [isOnboardingVisible, setIsOnboardingVisible] = useState(false);
   const [hasSeenOnboarding, setHasSeenOnboarding] = useState(false);
   const [isOnboardingLoaded, setIsOnboardingLoaded] = useState(false);
@@ -212,7 +174,6 @@ function AppContent() {
     }
     setActivePicker(null);
     setMenuScheduleId(null);
-    setMenuLocationId(null);
     setIsNamePromptOpen(false);
     Keyboard.dismiss();
   }, [activeTab]);
@@ -229,11 +190,7 @@ function AppContent() {
           }))
         );
       }
-      setLocations(stored?.locations ?? []);
       setQuietHours(stored?.quietHours ?? DEFAULT_QUIET_HOURS);
-      setLocationRadiusMeters(
-        stored?.locationRadiusMeters ?? DEFAULT_LOCATION_RADIUS_METERS
-      );
       await refreshAuthorization();
       setIsHydrated(true);
     };
@@ -303,42 +260,12 @@ function AppContent() {
     }
     void saveSettings({
       schedules,
-      locations,
       quietHours,
-      locationRadiusMeters,
     });
-  }, [schedules, locations, quietHours, locationRadiusMeters, isHydrated]);
+  }, [schedules, quietHours, isHydrated]);
 
   useEffect(() => {
     schedulesRef.current = schedules;
-  }, [schedules]);
-
-  useEffect(() => {
-    setLocationRadiusDraft(locationRadiusMeters.toString());
-  }, [locationRadiusMeters]);
-
-  useEffect(() => {
-    if (!isHydrated) {
-      return;
-    }
-    void refreshLocationPermissionStatus();
-  }, [isHydrated]);
-
-  useEffect(() => {
-    if (activeTab !== 'locations') {
-      return;
-    }
-    void refreshLocationPermissionStatus();
-  }, [activeTab]);
-
-  const locationScheduleSignature = useMemo(() => {
-    return schedules
-      .map(
-        (schedule) =>
-          `${schedule.id}:${schedule.isActive ? '1' : '0'}:${schedule.locationId ?? 'anywhere'}`
-      )
-      .sort()
-      .join('|');
   }, [schedules]);
 
   useEffect(() => {
@@ -410,104 +337,6 @@ function AppContent() {
     if (!isHydrated) {
       return;
     }
-    void syncGeofencing();
-  }, [locations, locationRadiusMeters, locationScheduleSignature, isHydrated]);
-
-  useEffect(() => {
-    if (!isHydrated || activeTab !== 'home') {
-      return;
-    }
-    const locationSchedules = schedules.filter((schedule) => schedule.locationId);
-    if (locationSchedules.length === 0) {
-      setLocationDebugInfo({});
-      return;
-    }
-    let isCancelled = false;
-    const refresh = async () => {
-      const foreground = await Location.getForegroundPermissionsAsync();
-      if (!foreground.granted) {
-        const next = Object.fromEntries(
-          locationSchedules.map((schedule) => [
-            schedule.id,
-            'Location status: permission not granted.',
-          ])
-        );
-        if (!isCancelled) {
-          setLocationDebugInfo(next);
-        }
-        return;
-      }
-      const background = await Location.getBackgroundPermissionsAsync();
-      const fix = await getLocationFix();
-      if (!fix) {
-        const next = Object.fromEntries(
-          locationSchedules.map((schedule) => [
-            schedule.id,
-            'Location status: unable to read GPS.',
-          ])
-        );
-        if (!isCancelled) {
-          setLocationDebugInfo(next);
-        }
-        return;
-      }
-      const next: Record<string, string> = {};
-      for (const schedule of locationSchedules) {
-        const target = schedule.locationId ? getLocationTarget(schedule.locationId) : null;
-        if (!target) {
-          next[schedule.id] = 'Location status: saved location missing.';
-          continue;
-        }
-        const distance = Math.round(distanceInMeters(fix.coords, target));
-        const inside = distance <= locationRadiusMeters;
-        const ageSeconds = Math.round(fix.ageMs / 1000);
-        const accuracyMeters =
-          typeof fix.accuracyMeters === 'number' ? Math.round(fix.accuracyMeters) : null;
-        let detail = `Location status: ${distance} m from ${target.name} (${inside ? 'inside' : 'outside'} ${locationRadiusMeters} m).`;
-        if (Number.isFinite(ageSeconds)) {
-          detail += ` GPS age ${ageSeconds}s.`;
-        }
-        if (accuracyMeters !== null) {
-          detail += ` Accuracy ~${accuracyMeters}m.`;
-        }
-        if (!background.granted) {
-          detail += ' Background "Always" is off.';
-        }
-        next[schedule.id] = detail;
-      }
-      if (!isCancelled) {
-        setLocationDebugInfo(next);
-      }
-    };
-    void refresh();
-    return () => {
-      isCancelled = true;
-    };
-  }, [
-    activeTab,
-    isHydrated,
-    locationRadiusMeters,
-    locationScheduleSignature,
-    locations,
-    schedules,
-  ]);
-
-  useEffect(() => {
-    if (!isHydrated) {
-      return;
-    }
-    const locationSchedules = schedules.filter(
-      (schedule) => schedule.isActive && schedule.locationId
-    );
-    locationSchedules.forEach((schedule) => {
-      void rescheduleSchedule(schedule, { silent: true, preserveActive: true });
-    });
-  }, [locations, locationRadiusMeters, isHydrated]);
-
-  useEffect(() => {
-    if (!isHydrated) {
-      return;
-    }
     const activeSchedules = schedules.filter((schedule) => schedule.isActive);
     activeSchedules.forEach((schedule) => {
       void rescheduleSchedule(schedule, { silent: true, preserveActive: true });
@@ -530,8 +359,7 @@ function AppContent() {
         schedule.startMinutesFromMidnight !== previous.startMinutesFromMidnight ||
         schedule.endMinutesFromMidnight !== previous.endMinutesFromMidnight ||
         schedule.message !== previous.message ||
-        !areDaysEqual(schedule.daysOfWeek, previous.daysOfWeek) ||
-        schedule.locationId !== previous.locationId;
+        !areDaysEqual(schedule.daysOfWeek, previous.daysOfWeek);
       if (hasChanged) {
         debouncedReschedule(schedule);
       }
@@ -560,6 +388,37 @@ function AppContent() {
     }
     setAuthorizationStatus('denied');
     return false;
+  };
+
+  const sendTestNotification = async (schedule: Schedule, index: number) => {
+    const scheduleName = schedule.name?.trim() || getDefaultNotificationName(index);
+    const titleSuffix = schedule.name.trim() ? ` - ${schedule.name.trim()}` : '';
+    const message = schedule.message.trim() || DEFAULT_MESSAGE;
+    const granted =
+      authorizationStatus === 'authorized' ? true : await requestAuthorization();
+    if (!granted) {
+      Alert.alert(
+        'Notifications off',
+        'Enable notifications in Settings to send a test alert.'
+      );
+      return;
+    }
+    try {
+      await Notifications.scheduleNotificationAsync({
+        content: {
+          title: `${APP_NAME}${titleSuffix}`,
+          body: message,
+          sound: 'default',
+          data: { scheduleId: schedule.id, isTest: true },
+        },
+        trigger: {
+          type: 'date',
+          date: new Date(Date.now() + 1000),
+        },
+      });
+    } catch (error) {
+      Alert.alert('Test notification failed', formatError(error));
+    }
   };
 
   const clearRescheduleTimer = (scheduleId: string) => {
@@ -691,561 +550,13 @@ function AppContent() {
     };
   }, []);
 
-  const getLocationLabel = (locationId: string | null) => {
-    if (!locationId) {
-      return ANYWHERE_LABEL;
-    }
-    return locations.find((location) => location.id === locationId)?.name ?? 'Saved location';
-  };
-
-  const getLocationTarget = (locationId: string | null) => {
-    if (!locationId) {
-      return null;
-    }
-    return locations.find((location) => location.id === locationId) ?? null;
-  };
-
-  const toRadians = (value: number) => (value * Math.PI) / 180;
-
-  const distanceInMeters = (from: { latitude: number; longitude: number }, to: StoredLocation) => {
-    const earthRadius = 6371000;
-    const dLat = toRadians(to.latitude - from.latitude);
-    const dLon = toRadians(to.longitude - from.longitude);
-    const lat1 = toRadians(from.latitude);
-    const lat2 = toRadians(to.latitude);
-
-    const a =
-      Math.sin(dLat / 2) * Math.sin(dLat / 2) +
-      Math.cos(lat1) * Math.cos(lat2) * Math.sin(dLon / 2) * Math.sin(dLon / 2);
-    const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-    return earthRadius * c;
-  };
-
-  const isWithinRadius = (from: { latitude: number; longitude: number }, to: StoredLocation) =>
-    distanceInMeters(from, to) <= locationRadiusMeters;
-
-  const checkLocationPermissions = async (requireBackground = false) => {
-    if (Platform.OS === 'web') {
-      return false;
-    }
-    const foreground = await Location.getForegroundPermissionsAsync();
-    if (!foreground.granted) {
-      return false;
-    }
-    if (!requireBackground) {
-      return true;
-    }
-    const background = await Location.getBackgroundPermissionsAsync();
-    return background.granted;
-  };
-
-  const refreshLocationPermissionStatus = async () => {
-    if (Platform.OS === 'web') {
-      setLocationPermissionStatus(null);
-      return;
-    }
-    const foreground = await Location.getForegroundPermissionsAsync();
-    const background = await Location.getBackgroundPermissionsAsync();
-    setLocationPermissionStatus({
-      foreground: foreground.granted,
-      background: background.granted,
-    });
-  };
-
-  const confirmBackgroundLocation = () =>
-    new Promise<boolean>((resolve) => {
-      Alert.alert(
-        'Allow location in the background?',
-        'We use background location so alerts can fire when you arrive at or leave a saved place, even if the app is closed.',
-        [
-          { text: 'Not now', style: 'cancel', onPress: () => resolve(false) },
-          { text: 'Continue', onPress: () => resolve(true) },
-        ],
-        { cancelable: true }
-      );
-    });
-
-  const requestLocationPermissions = async (options?: {
-    requireBackground?: boolean;
-    explainBackground?: boolean;
-  }) => {
-    if (Platform.OS === 'web') {
-      Alert.alert('Location not supported', 'Saved location alerts are not available on web.');
-      return false;
-    }
-    const servicesEnabled = await Location.hasServicesEnabledAsync();
-    if (!servicesEnabled) {
-      Alert.alert(
-        'Location services off',
-        'Turn on Location Services to use saved location alerts.'
-      );
-      return false;
-    }
-    const foreground = await Location.requestForegroundPermissionsAsync();
-    if (!foreground.granted) {
-      Alert.alert(
-        'Location permission needed',
-        'Allow location access to use saved location alerts.'
-      );
-      void refreshLocationPermissionStatus();
-      return false;
-    }
-    if (!options?.requireBackground) {
-      void refreshLocationPermissionStatus();
-      return true;
-    }
-    const backgroundExisting = await Location.getBackgroundPermissionsAsync();
-    if (backgroundExisting.granted) {
-      void refreshLocationPermissionStatus();
-      return true;
-    }
-    if (options?.explainBackground) {
-      const shouldContinue = await confirmBackgroundLocation();
-      if (!shouldContinue) {
-        return false;
-      }
-    }
-    const background = await Location.requestBackgroundPermissionsAsync();
-    if (!background.granted) {
-      Alert.alert(
-        'Background location needed',
-        'Allow "Always" location access so saved location alerts work when the app is closed.'
-      );
-      void refreshLocationPermissionStatus();
-      return false;
-    }
-    void refreshLocationPermissionStatus();
-    return true;
-  };
-
-  const getLocationFix = async () => {
-    if (Platform.OS === 'web') {
-      return null;
-    }
-    try {
-      const lastKnown = await Location.getLastKnownPositionAsync({
-        maxAge: LOCATION_LAST_KNOWN_MAX_AGE_MS,
-      });
-      if (lastKnown?.coords) {
-        return {
-          coords: lastKnown.coords,
-          ageMs: Math.max(0, Date.now() - lastKnown.timestamp),
-          accuracyMeters: lastKnown.coords.accuracy ?? null,
-        };
-      }
-      const current = await Location.getCurrentPositionAsync({
-        accuracy: Location.Accuracy.High,
-      });
-      return {
-        coords: current.coords,
-        ageMs: Math.max(0, Date.now() - current.timestamp),
-        accuracyMeters: current.coords.accuracy ?? null,
-      };
-    } catch {
-      return null;
-    }
-  };
-
-  const getCurrentCoords = async () => {
-    const fix = await getLocationFix();
-    return fix?.coords ?? null;
-  };
-
-  const isScheduleLocationEligible = async (
-    schedule: Schedule,
-    options?: { requestPermissions?: boolean; silent?: boolean }
-  ) => {
-    if (!schedule.locationId) {
-      return true;
-    }
-    const target = getLocationTarget(schedule.locationId);
-    const label = getLocationLabel(schedule.locationId);
-    if (!target) {
-      if (!options?.silent) {
-        setInlineMessage('Select a saved location to enable this alert.');
-      }
-      return false;
-    }
-    const permissionsGranted = options?.requestPermissions
-      ? await requestLocationPermissions({ requireBackground: true, explainBackground: true })
-      : await checkLocationPermissions(true);
-    if (!permissionsGranted) {
-      if (!options?.silent) {
-        setInlineMessage('Location permission is required for saved location alerts.');
-      }
-      return false;
-    }
-    const coords = await getCurrentCoords();
-    if (!coords) {
-      if (!options?.silent) {
-        setInlineMessage('Could not read your location.');
-      }
-      return false;
-    }
-    if (!isWithinRadius(coords, target)) {
-      if (!options?.silent) {
-        setInlineMessage(`Will alert when you're at ${label}.`);
-      }
-      return false;
-    }
-    return true;
-  };
-
-  const syncGeofencing = async () => {
-    if (Platform.OS === 'web') {
-      return;
-    }
-    const activeLocationIds = new Set(
-      schedules
-        .filter((schedule) => schedule.isActive && schedule.locationId)
-        .map((schedule) => schedule.locationId)
-    );
-
-    if (activeLocationIds.size === 0) {
-      try {
-        const started = await Location.hasStartedGeofencingAsync(GEOFENCE_TASK);
-        if (started) {
-          await Location.stopGeofencingAsync(GEOFENCE_TASK);
-        }
-      } catch {
-        // Ignore geofencing stop errors.
-      }
-      return;
-    }
-
-    const permissionsGranted = await checkLocationPermissions(true);
-    if (!permissionsGranted) {
-      return;
-    }
-
-    const regions: Location.LocationRegion[] = locations
-      .filter((location) => activeLocationIds.has(location.id))
-      .map((location) => ({
-        identifier: location.id,
-        latitude: location.latitude,
-        longitude: location.longitude,
-        radius: locationRadiusMeters,
-        notifyOnEnter: true,
-        notifyOnExit: true,
-      }));
-
-    if (regions.length === 0) {
-      try {
-        const started = await Location.hasStartedGeofencingAsync(GEOFENCE_TASK);
-        if (started) {
-          await Location.stopGeofencingAsync(GEOFENCE_TASK);
-        }
-      } catch {
-        // Ignore geofencing stop errors.
-      }
-      return;
-    }
-
-    try {
-      await Location.startGeofencingAsync(GEOFENCE_TASK, regions);
-    } catch {
-      // Ignore geofencing start errors.
-    }
-  };
-
-  const scheduleIfEligible = async (
-    schedule: Schedule,
-    options?: { requestPermissions?: boolean; silent?: boolean }
-  ): Promise<ScheduleResult> => {
+  const scheduleIfEligible = async (schedule: Schedule): Promise<ScheduleResult> => {
     await cancelScheduleNotifications(schedule.id);
-    const eligible = await isScheduleLocationEligible(schedule, options);
-    if (!eligible) {
-      return { count: 0, skipped: true };
-    }
     return scheduleNotificationsBatch([schedule], { quietHours });
-  };
-
-  const openLocationNamePrompt = (options?: { location?: StoredLocation; mode?: 'add' | 'edit' }) => {
-    setNameDraft(options?.location?.name ?? '');
-    setNamePromptTarget('location');
-    setNamePromptMode(options?.mode ?? 'add');
-    setNamePromptScheduleId(null);
-    setNamePromptLocationId(options?.location?.id ?? null);
-    setIsNamePromptOpen(true);
-  };
-
-  const formatLocationAddress = (address: Location.LocationGeocodedAddress) => {
-    const streetBase = address.street ?? address.name;
-    const street =
-      address.streetNumber && streetBase
-        ? `${address.streetNumber} ${streetBase}`
-        : streetBase;
-    const city = address.city;
-    const region = address.region;
-    return [street, city, region].filter(Boolean).join(', ');
-  };
-
-  const getAddressFromCoords = async (coords: { latitude: number; longitude: number }) => {
-    try {
-      const results = await Location.reverseGeocodeAsync(coords);
-      if (!results.length) {
-        return undefined;
-      }
-      const formatted = formatLocationAddress(results[0]);
-      return formatted || undefined;
-    } catch {
-      return undefined;
-    }
-  };
-
-  const openMapPicker = async () => {
-    if (Platform.OS === 'web') {
-      Alert.alert('Maps not supported', 'Map picking is not available on web.');
-      setPendingLocationName(null);
-      setPendingLocationUpdate(null);
-      return;
-    }
-    const foreground = await Location.getForegroundPermissionsAsync();
-    if (!foreground.granted) {
-      const foregroundRequest = await Location.requestForegroundPermissionsAsync();
-      if (!foregroundRequest.granted) {
-        Alert.alert(
-          'Location permission needed',
-          'Allow location access to pick a place on the map.'
-        );
-        setPendingLocationName(null);
-        setPendingLocationUpdate(null);
-        return;
-      }
-    }
-    const background = await Location.getBackgroundPermissionsAsync();
-    if (!background.granted) {
-      const choice = await new Promise<'open' | 'skip'>((resolve) => {
-        Alert.alert(
-          'Enable Always location',
-          'To save places, set Location to Always in Settings.',
-          [
-            { text: 'Not now', style: 'cancel', onPress: () => resolve('skip') },
-            { text: 'Open Settings', onPress: () => resolve('open') },
-          ],
-          { cancelable: true }
-        );
-      });
-      if (choice === 'open') {
-        setPendingLocationName(null);
-        setPendingLocationUpdate(null);
-        openSystemSettings();
-        return;
-      }
-    }
-    const coords = await getCurrentCoords();
-    const fallback = coords ?? { latitude: 37.3349, longitude: -122.00902 };
-    const region: Region = {
-      latitude: fallback.latitude,
-      longitude: fallback.longitude,
-      latitudeDelta: 0.01,
-      longitudeDelta: 0.01,
-    };
-    setMapPickerCoords(fallback);
-    setMapPickerRegion(region);
-    setIsMapPickerOpen(true);
-  };
-
-  const saveLocationFromCoords = async (
-    name: string,
-    coords: { latitude: number; longitude: number },
-    locationId?: string
-  ) => {
-    try {
-      const address = await getAddressFromCoords(coords);
-      if (locationId) {
-        setLocations((currentLocations) =>
-          currentLocations.map((location) =>
-            location.id === locationId ? { ...location, ...coords, address } : location
-          )
-        );
-        Alert.alert(
-          'Location updated',
-          `Current location saved for ${name}. Alerts will trigger within ${locationRadiusMeters} meters.`
-        );
-        return;
-      }
-      const nextLocation: StoredLocation = {
-        id: `${Date.now()}_${Math.random().toString(16).slice(2)}`,
-        name,
-        ...coords,
-        address,
-      };
-      setLocations((currentLocations) => [...currentLocations, nextLocation]);
-      Alert.alert(
-        'Location saved',
-        `Current location saved for ${name}. Alerts will trigger within ${locationRadiusMeters} meters.`
-      );
-    } catch {
-      Alert.alert('Location error', 'Unable to read your location.');
-    }
-  };
-
-  const saveLocationFromCurrent = async (name: string, locationId?: string) => {
-    const permissionsGranted = await requestLocationPermissions({
-      requireBackground: false,
-    });
-    if (!permissionsGranted) {
-      return;
-    }
-    try {
-      const coords = await getCurrentCoords();
-      if (!coords) {
-        Alert.alert('Location error', 'Unable to read your location.');
-        return;
-      }
-      await saveLocationFromCoords(
-        name,
-        { latitude: coords.latitude, longitude: coords.longitude },
-        locationId
-      );
-    } catch {
-      Alert.alert('Location error', 'Unable to read your location.');
-    }
-  };
-
-  const addLocation = () => {
-    setPendingLocationName(null);
-    setPendingLocationUpdate(null);
-    InteractionManager.runAfterInteractions(() => {
-      openLocationNamePrompt();
-    });
-  };
-
-  const renameLocation = (location: StoredLocation) => {
-    if (Platform.OS === 'ios') {
-      Alert.prompt(
-        'Rename location',
-        undefined,
-        [
-          { text: 'Cancel', style: 'cancel' },
-          {
-            text: 'Save',
-            onPress: (text) => {
-              const formatted = formatLocationName(text ?? '');
-              if (!formatted) {
-                return;
-              }
-              setLocations((currentLocations) =>
-                currentLocations.map((item) =>
-                  item.id === location.id ? { ...item, name: formatted } : item
-                )
-              );
-            },
-          },
-        ],
-        'plain-text',
-        location.name
-      );
-      return;
-    }
-    openLocationNamePrompt({ location, mode: 'edit' });
-  };
-
-  const updateLocationFromCurrent = (location: StoredLocation) => {
-    void saveLocationFromCurrent(location.name, location.id);
-  };
-
-  const openSystemSettings = () => {
-    Linking.openSettings().catch(() => {
-      Alert.alert(
-        'Unable to open Settings',
-        'Open the Settings app to adjust location permissions.'
-      );
-    });
-  };
-
-  const requestLocationAccess = async () => {
-    const requireBackground = needsLocationBackground || hasLocationSchedules;
-    await requestLocationPermissions({
-      requireBackground,
-      explainBackground: requireBackground,
-    });
-  };
-
-  const closeMapPicker = () => {
-    setIsMapPickerOpen(false);
-    setMapPickerRegion(null);
-    setMapPickerCoords(null);
-  };
-
-  const openLocationPicker = (schedule: Schedule) => {
-    if (Platform.OS !== 'ios') {
-      return;
-    }
-    const savedNames = locations.map((location) => location.name);
-    const options = [ANYWHERE_LABEL, ...savedNames, 'Manage locations', 'Cancel'];
-    const manageIndex = options.length - 2;
-    const cancelButtonIndex = options.length - 1;
-
-    ActionSheetIOS.showActionSheetWithOptions(
-      {
-        options,
-        cancelButtonIndex,
-        title: 'Choose location',
-      },
-      (buttonIndex) => {
-        if (buttonIndex === cancelButtonIndex) {
-          return;
-        }
-        if (buttonIndex === manageIndex) {
-          setActiveTab('locations');
-          return;
-        }
-        if (buttonIndex === 0) {
-          updateSchedule(schedule.id, { locationId: null });
-          return;
-        }
-        const location = locations[buttonIndex - 1];
-        if (location) {
-          updateSchedule(schedule.id, { locationId: location.id });
-        }
-      }
-    );
-  };
-
-  const removeLocation = (location: StoredLocation) => {
-    setLocations((currentLocations) =>
-      currentLocations.filter((item) => item.id !== location.id)
-    );
-    setSchedules((currentSchedules) =>
-      currentSchedules.map((schedule) =>
-        schedule.locationId === location.id ? { ...schedule, locationId: null } : schedule
-      )
-    );
   };
 
   const updateQuietHours = (patch: Partial<QuietHours>) => {
     setQuietHours((current) => ({ ...current, ...patch }));
-  };
-
-  const clampLocationRadius = (value: number) => {
-    if (!Number.isFinite(value)) {
-      return DEFAULT_LOCATION_RADIUS_METERS;
-    }
-    return Math.min(1000, Math.max(25, Math.round(value)));
-  };
-
-  const updateLocationRadiusDraft = (value: string) => {
-    const sanitized = value.replace(/[^0-9]/g, '');
-    setLocationRadiusDraft(sanitized);
-  };
-
-  const stepLocationRadius = (direction: 1 | -1) => {
-    const next = clampLocationRadius(locationRadiusMeters + direction * 25);
-    setLocationRadiusMeters(next);
-    setLocationRadiusDraft(next.toString());
-  };
-
-  const commitLocationRadiusDraft = () => {
-    const parsed = Number(locationRadiusDraft);
-    if (!Number.isFinite(parsed)) {
-      setLocationRadiusDraft(locationRadiusMeters.toString());
-      return;
-    }
-    const next = clampLocationRadius(parsed);
-    setLocationRadiusMeters(next);
-    setLocationRadiusDraft(next.toString());
   };
 
   const completeOnboarding = () => {
@@ -1288,10 +599,7 @@ function AppContent() {
     }
 
     try {
-      const result = await scheduleIfEligible(schedule, { silent: silentSuccess });
-      if (result.skipped) {
-        return;
-      }
+      const result = await scheduleIfEligible(schedule);
       if (result.error) {
         setInlineMessage(`Notification setup failed: ${result.error}`);
         if (!preserveActive) {
@@ -1346,17 +654,7 @@ function AppContent() {
         return;
       }
       clearRescheduleTimer(scheduleId);
-      const result = await scheduleIfEligible(
-        { ...schedule, isActive: true },
-        { requestPermissions: Boolean(schedule.locationId) }
-      );
-      if (schedule.locationId) {
-        void syncGeofencing();
-      }
-      if (result.skipped) {
-        setScheduleActive(scheduleId, true);
-        return;
-      }
+      const result = await scheduleIfEligible({ ...schedule, isActive: true });
       if (result.error) {
         setInlineMessage(`Notification setup failed: ${result.error}`);
         setScheduleActive(scheduleId, false);
@@ -1478,10 +776,8 @@ function AppContent() {
       return;
     }
     setNameDraft('');
-    setNamePromptTarget('schedule');
     setNamePromptMode('add');
     setNamePromptScheduleId(null);
-    setNamePromptLocationId(null);
     setIsNamePromptOpen(true);
   };
 
@@ -1509,10 +805,8 @@ function AppContent() {
       return;
     }
     setNameDraft(schedule.name);
-    setNamePromptTarget('schedule');
     setNamePromptMode('edit');
     setNamePromptScheduleId(schedule.id);
-    setNamePromptLocationId(null);
     setIsNamePromptOpen(true);
   };
 
@@ -1533,41 +827,15 @@ function AppContent() {
     setMenuScheduleId(null);
   };
 
-  const closeLocationMenu = () => {
-    setMenuLocationId(null);
-  };
-
   const closeNamePrompt = () => {
     Keyboard.dismiss();
     setNamePromptScheduleId(null);
-    setNamePromptLocationId(null);
     setIsNamePromptOpen(false);
   };
 
   const confirmNamePrompt = () => {
-    const formatted =
-      namePromptTarget === 'location'
-        ? formatLocationName(nameDraft)
-        : formatNotificationName(nameDraft);
+    const formatted = formatNotificationName(nameDraft);
     if (!formatted) {
-      return;
-    }
-    if (namePromptTarget === 'location') {
-      if (namePromptMode === 'add') {
-        closeNamePrompt();
-        setPendingLocationName(formatted);
-        setPendingLocationUpdate(null);
-        void openMapPicker();
-        return;
-      }
-      if (namePromptMode === 'edit' && namePromptLocationId) {
-        setLocations((currentLocations) =>
-          currentLocations.map((location) =>
-            location.id === namePromptLocationId ? { ...location, name: formatted } : location
-          )
-        );
-      }
-      closeNamePrompt();
       return;
     }
     if (namePromptMode === 'add') {
@@ -1624,24 +892,8 @@ function AppContent() {
 
   const canConfirmName = nameDraft.trim().length > 0;
   const isEditingName = namePromptMode === 'edit';
-  const namePromptTitle =
-    namePromptTarget === 'location'
-      ? isEditingName
-        ? 'Rename location'
-        : 'New location'
-      : isEditingName
-        ? 'Edit notification'
-        : 'New notification';
-  const namePromptPlaceholder =
-    namePromptTarget === 'location' ? 'Location name' : 'Notification name';
-  const hasLocationSchedules = schedules.some((schedule) => schedule.locationId);
-  const needsLocationForeground =
-    locationPermissionStatus !== null && !locationPermissionStatus.foreground;
-  const needsLocationBackground =
-    locationPermissionStatus !== null &&
-    locationPermissionStatus.foreground &&
-    hasLocationSchedules &&
-    !locationPermissionStatus.background;
+  const namePromptTitle = isEditingName ? 'Edit notification' : 'New notification';
+  const namePromptPlaceholder = 'Notification name';
 
   const onPickerChange = (_: DateTimePickerEvent, selected?: Date) => {
     if (!selected || !activePicker) {
@@ -1725,10 +977,10 @@ function AppContent() {
               schedule.startMinutesFromMidnight,
               schedule.endMinutesFromMidnight
             );
-            const locationLabel = getLocationLabel(schedule.locationId);
-            const locationDebugLine = locationDebugInfo[schedule.id];
-            const summary = `${daysSummary} | ${timeSummary} | Every ${schedule.intervalMinutes} min | ${locationLabel}`;
+            const summary = `${daysSummary} | ${timeSummary} | Every ${schedule.intervalMinutes} min`;
             const isCollapsed = collapsedSchedules.includes(schedule.id);
+            const scheduleDisplayName =
+              schedule.name?.trim() || getDefaultNotificationName(index);
             return (
               <View
                 key={schedule.id}
@@ -1748,9 +1000,7 @@ function AppContent() {
                     onPress={() => toggleScheduleCollapse(schedule.id)}
                   >
                     <Text style={[styles.cardTitleInput, { color: colors.textPrimary }]}>
-                      {schedule.name?.trim()
-                        ? schedule.name
-                        : getDefaultNotificationName(index)}
+                      {scheduleDisplayName}
                     </Text>
                     <View
                       style={[
@@ -1820,6 +1070,21 @@ function AppContent() {
                     returnKeyType="done"
                     onSubmitEditing={Keyboard.dismiss}
                   />
+                </View>
+                <View style={styles.cardActionRow}>
+                  <Pressable
+                    style={[
+                      styles.testButton,
+                      { borderColor: colors.border, backgroundColor: colors.inputBackground },
+                    ]}
+                    onPress={() => void sendTestNotification(schedule, index)}
+                    accessibilityRole="button"
+                    accessibilityLabel={`Send test notification for ${scheduleDisplayName}`}
+                  >
+                    <Text style={[styles.testButtonLabel, { color: colors.textPrimary }]}>
+                      Test notification
+                    </Text>
+                  </Pressable>
                 </View>
 
                 {!isCollapsed ? (
@@ -1932,30 +1197,6 @@ function AppContent() {
                       </Text>
                     ) : null}
 
-                    <View style={[styles.divider, { backgroundColor: colors.border }]} />
-
-                    <Text style={[styles.messageLabel, { color: colors.label }]}>Location</Text>
-                    <Pressable
-                      style={[
-                        styles.timeRow,
-                        { backgroundColor: colors.inputBackground, borderColor: colors.border },
-                      ]}
-                      onPress={() => openLocationPicker(schedule)}
-                    >
-                      <Text style={[styles.timeLabel, { color: colors.label }]}>Choose</Text>
-                      <Text
-                        style={[styles.timeValue, { color: colors.textPrimary }]}
-                        numberOfLines={1}
-                      >
-                        {locationLabel}
-                      </Text>
-                    </Pressable>
-                    {schedule.locationId ? (
-                      <Text style={[styles.helperText, { color: colors.textMuted }]}>
-                        {locationDebugLine ?? 'Location status: checking...'}
-                      </Text>
-                    ) : null}
-
                   </>
                 ) : null}
               </View>
@@ -1964,144 +1205,6 @@ function AppContent() {
 
         </ScrollView>
       </KeyboardAvoidingView>
-      ) : activeTab === 'locations' ? (
-        <ScrollView
-          style={styles.scroll}
-          contentContainerStyle={[styles.settingsContainer, { backgroundColor: colors.background }]}
-          contentInsetAdjustmentBehavior="always"
-          keyboardShouldPersistTaps="handled"
-          showsVerticalScrollIndicator={false}
-        >
-          <View style={styles.titleRow}>
-            <Text style={[styles.title, { color: colors.textPrimary }]}>Locations</Text>
-            <Pressable
-              style={[
-                styles.addButton,
-                { backgroundColor: colors.inputBackground, borderColor: colors.border },
-              ]}
-              onPress={addLocation}
-              accessibilityRole="button"
-              accessibilityLabel="Add location"
-              hitSlop={8}
-            >
-              <MaterialIcons name="add" size={22} color={colors.accent} />
-            </Pressable>
-          </View>
-          <View
-            style={[
-              styles.card,
-              {
-                backgroundColor: colors.card,
-                shadowColor: colors.shadow,
-                borderColor: colors.border,
-              },
-            ]}
-          >
-            <Text style={[styles.settingsSectionTitle, { color: colors.textPrimary }]}>
-              Location settings
-            </Text>
-            <Text style={[styles.settingsHelper, { color: colors.textSecondary }]}>
-              Alerts fire within {locationRadiusMeters} meters.
-            </Text>
-            <View style={styles.locationRadiusRow}>
-              <View style={styles.settingsText}>
-                <Text style={[styles.settingsLabel, { color: colors.textPrimary }]}>
-                  Alert radius
-                </Text>
-                <Text style={[styles.settingsHelper, { color: colors.textSecondary }]}>
-                  25m to 1000m
-                </Text>
-              </View>
-              <View style={styles.radiusControls}>
-                <Pressable
-                  style={[
-                    styles.stepperButton,
-                    { backgroundColor: colors.accent, borderColor: colors.accent },
-                  ]}
-                  onPress={() => stepLocationRadius(-1)}
-                >
-                  <Text style={styles.stepperLabel}>-</Text>
-                </Pressable>
-                <View style={styles.radiusInputGroup}>
-                  <TextInput
-                    value={locationRadiusDraft}
-                    onChangeText={updateLocationRadiusDraft}
-                    onBlur={commitLocationRadiusDraft}
-                    onSubmitEditing={commitLocationRadiusDraft}
-                    keyboardType="number-pad"
-                    returnKeyType="done"
-                    style={[
-                      styles.radiusInput,
-                      { color: colors.textPrimary, borderColor: colors.border },
-                    ]}
-                  />
-                  <Text style={[styles.intervalUnit, { color: colors.textSecondary }]}>m</Text>
-                </View>
-                <Pressable
-                  style={[
-                    styles.stepperButton,
-                    { backgroundColor: colors.accent, borderColor: colors.accent },
-                  ]}
-                  onPress={() => stepLocationRadius(1)}
-                >
-                  <Text style={styles.stepperLabel}>+</Text>
-                </Pressable>
-              </View>
-            </View>
-            <View style={[styles.divider, { backgroundColor: colors.border }]} />
-            <Text style={[styles.settingsSectionTitle, { color: colors.textPrimary }]}>
-              Saved locations
-            </Text>
-            {locations.length === 0 ? (
-              <Text style={[styles.settingsHelper, { color: colors.textSecondary }]}>
-                No saved locations yet.
-              </Text>
-            ) : (
-              locations.map((location) => (
-                <View key={location.id} style={styles.locationSettingRow}>
-                  <View style={styles.settingsText}>
-                    <Text style={[styles.settingsLabel, { color: colors.textPrimary }]}>
-                      {location.name}
-                    </Text>
-                    {location.address ? (
-                      <Text style={[styles.settingsHelper, { color: colors.textSecondary }]}>
-                        {location.address}
-                      </Text>
-                    ) : null}
-                  </View>
-                  <View style={styles.locationActions}>
-                    <Pressable
-                      style={styles.locationIconButton}
-                      onPress={() => setMenuLocationId(location.id)}
-                      accessibilityRole="button"
-                      accessibilityLabel={`${location.name} actions`}
-                      hitSlop={10}
-                    >
-                      <Text style={[styles.menuLabel, { color: colors.textSecondary }]}>...</Text>
-                    </Pressable>
-                  </View>
-                </View>
-              ))
-            )}
-            {needsLocationForeground || needsLocationBackground ? (
-              <>
-                <Text style={[styles.settingsHelper, { color: colors.textSecondary }]}>
-                  {needsLocationForeground
-                    ? 'Location access is off. Allow While Using to save places.'
-                    : 'Background location is off. Enable Always to alert when the app is closed.'}
-                </Text>
-                <Pressable
-                  style={[styles.secondaryButton, { borderColor: colors.border }]}
-                  onPress={requestLocationAccess}
-                >
-                  <Text style={[styles.secondaryButtonLabel, { color: colors.textPrimary }]}>
-                    Enable Location
-                  </Text>
-                </Pressable>
-              </>
-            ) : null}
-          </View>
-        </ScrollView>
       ) : (
         <ScrollView
           style={styles.scroll}
@@ -2225,27 +1328,6 @@ function AppContent() {
             ]}
           >
             Home
-          </Text>
-        </Pressable>
-        <Pressable
-          onPress={() => setActiveTab('locations')}
-          style={styles.tabButton}
-          accessibilityRole="button"
-          accessibilityState={{ selected: activeTab === 'locations' }}
-        >
-          <MaterialIcons
-            name="place"
-            size={25}
-            color={activeTab === 'locations' ? colors.accent : colors.textSecondary}
-            style={styles.tabIcon}
-          />
-          <Text
-            style={[
-              styles.tabLabel,
-              { color: activeTab === 'locations' ? colors.accent : colors.textSecondary },
-            ]}
-          >
-            Locations
           </Text>
         </Pressable>
         <Pressable
@@ -2446,7 +1528,7 @@ function AppContent() {
               Welcome to Never4Get
             </Text>
             <Text style={[styles.onboardingText, { color: colors.textSecondary }]}>
-              Enable notifications so we can remind you. Location is optional for saved location alerts.
+              Enable notifications so we can remind you.
             </Text>
             <Pressable
               style={[
@@ -2461,171 +1543,6 @@ function AppContent() {
         </View>
       ) : null}
 
-      {activeTab === 'locations' && menuLocationId ? (
-        <View style={[styles.sheetBackdrop, { backgroundColor: colors.sheetBackdrop }]}>
-          <Pressable style={StyleSheet.absoluteFillObject} onPress={closeLocationMenu} />
-          <View
-            style={[
-              styles.menuSheet,
-              {
-                backgroundColor: colors.sheet,
-                borderColor: colors.border,
-                shadowColor: colors.shadow,
-              },
-            ]}
-          >
-            <Pressable
-              style={styles.menuItem}
-              onPress={() => {
-                const location = locations.find((item) => item.id === menuLocationId);
-                closeLocationMenu();
-                if (location) {
-                  renameLocation(location);
-                }
-              }}
-            >
-              <View style={styles.menuItemContent}>
-                <MaterialIcons name="edit" size={18} color={colors.textPrimary} />
-                <Text style={[styles.menuItemText, { color: colors.textPrimary }]}>Edit</Text>
-              </View>
-            </Pressable>
-            <Pressable
-              style={styles.menuItem}
-              onPress={() => {
-                const location = locations.find((item) => item.id === menuLocationId);
-                closeLocationMenu();
-                if (location) {
-                  setPendingLocationName(null);
-                  setPendingLocationUpdate({ id: location.id, name: location.name });
-                  void openMapPicker();
-                }
-              }}
-            >
-              <View style={styles.menuItemContent}>
-                <MaterialIcons name="place" size={18} color={colors.textPrimary} />
-                <Text style={[styles.menuItemText, { color: colors.textPrimary }]}>
-                  Change location
-                </Text>
-              </View>
-            </Pressable>
-            <Pressable
-              style={styles.menuItem}
-              onPress={() => {
-                const location = locations.find((item) => item.id === menuLocationId);
-                closeLocationMenu();
-                if (location) {
-                  removeLocation(location);
-                }
-              }}
-            >
-              <View style={styles.menuItemContent}>
-                <MaterialIcons name="delete-outline" size={18} color={colors.remove} />
-                <Text style={[styles.menuItemText, { color: colors.remove }]}>Remove</Text>
-              </View>
-            </Pressable>
-            <Pressable style={styles.menuCancel} onPress={closeLocationMenu}>
-              <View style={styles.menuCancelContent}>
-                <MaterialIcons name="close" size={18} color={colors.textSecondary} />
-                <Text style={[styles.menuCancelText, { color: colors.textSecondary }]}>
-                  Cancel
-                </Text>
-              </View>
-            </Pressable>
-          </View>
-        </View>
-      ) : null}
-
-      {isMapPickerOpen ? (
-        <View style={[styles.sheetBackdrop, { backgroundColor: colors.sheetBackdrop }]}>
-          <View
-            style={[
-              styles.mapPickerCard,
-              { backgroundColor: colors.card, borderColor: colors.border, shadowColor: colors.shadow },
-            ]}
-          >
-            <View style={styles.mapPickerHeader}>
-              <Text style={[styles.mapPickerTitle, { color: colors.textPrimary }]}>
-                Pick a location
-              </Text>
-              <Pressable
-                onPress={() => {
-                  setPendingLocationName(null);
-                  setPendingLocationUpdate(null);
-                  closeMapPicker();
-                }}
-                hitSlop={10}
-              >
-                <MaterialIcons name="close" size={20} color={colors.textSecondary} />
-              </Pressable>
-            </View>
-            <View style={styles.mapPickerMap}>
-              {mapPickerRegion ? (
-                <MapView
-                  style={StyleSheet.absoluteFill}
-                  initialRegion={mapPickerRegion}
-                  onRegionChangeComplete={(region) => {
-                    setMapPickerRegion(region);
-                    setMapPickerCoords({
-                      latitude: region.latitude,
-                      longitude: region.longitude,
-                    });
-                  }}
-                >
-                </MapView>
-              ) : null}
-              <View pointerEvents="none" style={styles.mapPickerPin}>
-                <MaterialIcons name="location-on" size={36} color={colors.remove} />
-              </View>
-            </View>
-            <View style={styles.mapPickerActions}>
-              <Pressable
-                style={[
-                  styles.secondaryButton,
-                  { borderColor: colors.border, minWidth: 120 },
-                ]}
-                onPress={() => {
-                  setPendingLocationName(null);
-                  setPendingLocationUpdate(null);
-                  closeMapPicker();
-                }}
-              >
-                <Text style={[styles.secondaryButtonLabel, { color: colors.textPrimary }]}>
-                  Cancel
-                </Text>
-              </Pressable>
-              <Pressable
-                style={[
-                  styles.secondaryButton,
-                  { backgroundColor: colors.accent, borderColor: colors.accent, minWidth: 160 },
-                ]}
-                onPress={() => {
-                  if (!mapPickerCoords) {
-                    return;
-                  }
-                  const update = pendingLocationUpdate;
-                  if (update) {
-                    closeMapPicker();
-                    setPendingLocationUpdate(null);
-                    void saveLocationFromCoords(update.name, mapPickerCoords, update.id);
-                    return;
-                  }
-                  const name = pendingLocationName?.trim();
-                  if (!name) {
-                    closeMapPicker();
-                    openLocationNamePrompt();
-                    return;
-                  }
-                  closeMapPicker();
-                  setPendingLocationName(null);
-                  void saveLocationFromCoords(name, mapPickerCoords);
-                }}
-              >
-                <Text style={styles.onboardingButtonLabel}>Use this location</Text>
-              </Pressable>
-            </View>
-          </View>
-        </View>
-      ) : null}
     </SafeAreaView>
   );
 }
@@ -2703,55 +1620,14 @@ const styles = StyleSheet.create({
     fontWeight: '700',
     fontFamily: FONT_BOLD,
   },
-  locationSettingRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    gap: 16,
-  },
-  locationRadiusRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    gap: 16,
-  },
-  radiusControls: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 8,
-  },
-  radiusInputGroup: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 6,
-  },
-  radiusInput: {
-    minWidth: 60,
-    textAlign: 'center',
-    borderWidth: 1,
-    borderRadius: 10,
-    paddingVertical: 6,
-    paddingHorizontal: 8,
-    fontSize: 14,
-    fontWeight: '600',
-    fontFamily: FONT_MEDIUM,
-  },
-  locationActions: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 10,
-  },
-  locationIconButton: {
-    padding: 6,
-  },
   scroll: {
     flex: 1,
   },
   title: {
-    fontSize: 32,
-    fontWeight: '700',
+    fontSize: 34,
+    fontWeight: '800',
     fontFamily: FONT_BOLD,
-    letterSpacing: 0.2,
+    letterSpacing: -0.5,
   },
   titleRow: {
     flexDirection: 'row',
@@ -2759,21 +1635,26 @@ const styles = StyleSheet.create({
     justifyContent: 'space-between',
   },
   addButton: {
-    width: 36,
-    height: 36,
-    borderRadius: 18,
-    borderWidth: 1,
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    borderWidth: 0,
     alignItems: 'center',
     justifyContent: 'center',
+    shadowOpacity: 0.15,
+    shadowRadius: 8,
+    shadowOffset: { width: 0, height: 2 },
+    elevation: 4,
   },
   card: {
-    borderRadius: 18,
-    padding: 16,
-    gap: 12,
+    borderRadius: 20,
+    padding: 20,
+    gap: 16,
     borderWidth: 1,
-    shadowOpacity: 0.04,
-    shadowRadius: 10,
-    shadowOffset: { width: 0, height: 6 },
+    shadowOpacity: 0.08,
+    shadowRadius: 20,
+    shadowOffset: { width: 0, height: 4 },
+    elevation: 8,
   },
   cardHeader: {
     flexDirection: 'row',
@@ -2833,12 +1714,32 @@ const styles = StyleSheet.create({
     fontFamily: FONT_REGULAR,
     marginBottom: 6,
   },
-  toggleButton: {
-    borderRadius: 10,
+  cardActionRow: {
+    flexDirection: 'row',
+    justifyContent: 'flex-end',
+  },
+  testButton: {
+    borderRadius: 12,
+    borderWidth: 1,
     paddingHorizontal: 12,
-    paddingVertical: 6,
-    width: 88,
+    paddingVertical: 8,
     alignItems: 'center',
+  },
+  testButtonLabel: {
+    fontSize: 12,
+    fontWeight: '700',
+    fontFamily: FONT_BOLD,
+  },
+  toggleButton: {
+    borderRadius: 12,
+    paddingHorizontal: 14,
+    paddingVertical: 8,
+    width: 92,
+    alignItems: 'center',
+    shadowOpacity: 0.12,
+    shadowRadius: 6,
+    shadowOffset: { width: 0, height: 2 },
+    elevation: 3,
   },
   toggleButtonLabel: {
     color: '#FFFFFF',
@@ -2854,10 +1755,10 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    paddingHorizontal: 10,
-    paddingVertical: 8,
-    borderRadius: 12,
-    borderWidth: 1,
+    paddingHorizontal: 14,
+    paddingVertical: 12,
+    borderRadius: 14,
+    borderWidth: 0,
   },
   intervalInputGroup: {
     flexDirection: 'row',
@@ -2865,13 +1766,13 @@ const styles = StyleSheet.create({
     gap: 6,
   },
   intervalInput: {
-    minWidth: 46,
+    minWidth: 50,
     textAlign: 'center',
-    borderWidth: 1,
-    borderRadius: 10,
-    paddingVertical: 6,
-    paddingHorizontal: 8,
-    fontSize: 15,
+    borderWidth: 0,
+    borderRadius: 12,
+    paddingVertical: 8,
+    paddingHorizontal: 10,
+    fontSize: 16,
     fontWeight: '600',
     fontFamily: FONT_MEDIUM,
   },
@@ -2881,12 +1782,16 @@ const styles = StyleSheet.create({
     fontFamily: FONT_MEDIUM,
   },
   stepperButton: {
-    width: 34,
-    height: 34,
-    borderRadius: 10,
-    borderWidth: 1,
+    width: 36,
+    height: 36,
+    borderRadius: 12,
+    borderWidth: 0,
     alignItems: 'center',
     justifyContent: 'center',
+    shadowOpacity: 0.1,
+    shadowRadius: 6,
+    shadowOffset: { width: 0, height: 2 },
+    elevation: 3,
   },
   stepperLabel: {
     fontSize: 20,
@@ -2903,10 +1808,10 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    paddingVertical: 10,
-    paddingHorizontal: 12,
-    borderRadius: 12,
-    borderWidth: 1,
+    paddingVertical: 12,
+    paddingHorizontal: 16,
+    borderRadius: 14,
+    borderWidth: 0,
   },
   timeRowGroup: {
     gap: 8,
@@ -2931,33 +1836,19 @@ const styles = StyleSheet.create({
   dayButton: {
     flex: 1,
     aspectRatio: 1,
-    borderRadius: 8,
-    borderWidth: 1,
+    borderRadius: 12,
+    borderWidth: 0,
     alignItems: 'center',
     justifyContent: 'center',
+    shadowOpacity: 0.08,
+    shadowRadius: 4,
+    shadowOffset: { width: 0, height: 2 },
+    elevation: 2,
   },
   dayLabel: {
     fontSize: 11,
     fontWeight: '600',
     fontFamily: FONT_BOLD,
-  },
-  locationRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 8,
-  },
-  locationChip: {
-    flex: 1,
-    borderRadius: 10,
-    borderWidth: 1,
-    paddingVertical: 8,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  locationChipLabel: {
-    fontSize: 12,
-    fontWeight: '600',
-    fontFamily: FONT_MEDIUM,
   },
   helperText: {
     fontSize: 12,
@@ -2972,17 +1863,21 @@ const styles = StyleSheet.create({
     fontFamily: FONT_MEDIUM,
   },
   messageInput: {
-    borderRadius: 12,
-    paddingHorizontal: 12,
-    paddingVertical: 10,
-    fontSize: 14,
+    borderRadius: 14,
+    paddingHorizontal: 16,
+    paddingVertical: 12,
+    fontSize: 15,
     fontFamily: FONT_REGULAR,
-    borderWidth: 1,
+    borderWidth: 0,
   },
   cardButton: {
-    borderRadius: 12,
-    paddingVertical: 12,
+    borderRadius: 14,
+    paddingVertical: 14,
     alignItems: 'center',
+    shadowOpacity: 0.15,
+    shadowRadius: 8,
+    shadowOffset: { width: 0, height: 2 },
+    elevation: 4,
   },
   cardButtonLabel: {
     color: '#FFFFFF',
@@ -2991,9 +1886,9 @@ const styles = StyleSheet.create({
     fontFamily: FONT_BOLD,
   },
   secondaryButton: {
-    borderRadius: 12,
-    borderWidth: 1,
-    paddingVertical: 12,
+    borderRadius: 14,
+    borderWidth: 1.5,
+    paddingVertical: 14,
     alignItems: 'center',
   },
   secondaryButtonLabel: {
@@ -3003,13 +1898,14 @@ const styles = StyleSheet.create({
   },
   namePrompt: {
     marginHorizontal: 18,
-    padding: 16,
-    borderRadius: 16,
-    borderWidth: 1,
-    shadowOpacity: 0.06,
-    shadowRadius: 12,
+    padding: 24,
+    borderRadius: 24,
+    borderWidth: 0,
+    shadowOpacity: 0.15,
+    shadowRadius: 20,
     shadowOffset: { width: 0, height: 8 },
-    gap: 12,
+    gap: 16,
+    elevation: 10,
   },
   namePromptTitle: {
     fontSize: 17,
@@ -3017,12 +1913,12 @@ const styles = StyleSheet.create({
     fontFamily: FONT_BOLD,
   },
   namePromptInput: {
-    borderRadius: 12,
-    paddingHorizontal: 12,
-    paddingVertical: 10,
-    fontSize: 15,
+    borderRadius: 14,
+    paddingHorizontal: 16,
+    paddingVertical: 12,
+    fontSize: 16,
     fontFamily: FONT_REGULAR,
-    borderWidth: 1,
+    borderWidth: 0,
   },
   namePromptActions: {
     flexDirection: 'row',
@@ -3036,9 +1932,13 @@ const styles = StyleSheet.create({
     fontFamily: FONT_MEDIUM,
   },
   namePromptButton: {
-    borderRadius: 12,
-    paddingHorizontal: 18,
-    paddingVertical: 10,
+    borderRadius: 14,
+    paddingHorizontal: 24,
+    paddingVertical: 12,
+    shadowOpacity: 0.15,
+    shadowRadius: 8,
+    shadowOffset: { width: 0, height: 2 },
+    elevation: 4,
   },
   namePromptButtonLabel: {
     color: '#FFFFFF',
@@ -3049,12 +1949,13 @@ const styles = StyleSheet.create({
   menuSheet: {
     marginHorizontal: 18,
     marginBottom: 18,
-    borderRadius: 16,
-    borderWidth: 1,
-    shadowOpacity: 0.06,
-    shadowRadius: 12,
+    borderRadius: 24,
+    borderWidth: 0,
+    shadowOpacity: 0.15,
+    shadowRadius: 20,
     shadowOffset: { width: 0, height: 8 },
-    paddingVertical: 6,
+    paddingVertical: 8,
+    elevation: 10,
   },
   menuItem: {
     paddingHorizontal: 20,
@@ -3191,8 +2092,12 @@ const styles = StyleSheet.create({
   },
   tabBar: {
     flexDirection: 'row',
-    borderTopWidth: 1,
+    borderTopWidth: 0,
     height: TAB_BAR_HEIGHT,
+    shadowOpacity: 0.08,
+    shadowRadius: 12,
+    shadowOffset: { width: 0, height: -4 },
+    elevation: 8,
   },
   tabButton: {
     flex: 1,
@@ -3214,46 +2119,46 @@ const styles = StyleSheet.create({
 });
 
 const lightColors = {
-  background: '#EDE3D9',
-  card: '#F6ECE2',
-  textPrimary: '#1C1C1E',
-  textSecondary: '#6E6E73',
-  textMuted: '#8E8E93',
-  label: '#3A3A3C',
-  inputBackground: '#F1E6DC',
-  inputText: '#1C1C1E',
-  placeholder: '#8E8E93',
-  accent: '#0A84FF',
-  active: '#34C759',
-  inactive: '#C7C7CC',
-  stop: '#FF3B30',
-  shadow: '#000000',
-  inline: '#8E6C6C',
-  sheet: '#F6ECE2',
-  sheetBackdrop: 'rgba(0, 0, 0, 0.35)',
-  remove: '#FF3B30',
-  border: '#DED0C4',
+  background: '#F0F4EF',
+  card: '#FAFDF9',
+  textPrimary: '#1C2B1A',
+  textSecondary: '#4A5F47',
+  textMuted: '#7A8F77',
+  label: '#1C2B1A',
+  inputBackground: '#E8F0E6',
+  inputText: '#1C2B1A',
+  placeholder: '#7A8F77',
+  accent: '#4A7C59',
+  active: '#5C9B6E',
+  inactive: '#D8E3D6',
+  stop: '#C65D3B',
+  shadow: '#4A7C59',
+  inline: '#6B9B7E',
+  sheet: '#FAFDF9',
+  sheetBackdrop: 'rgba(28, 43, 26, 0.5)',
+  remove: '#C65D3B',
+  border: '#DDE8DB',
 };
 
 const darkColors = {
-  background: '#0B0B0D',
-  card: '#1C1C1E',
-  textPrimary: '#F2F2F7',
-  textSecondary: '#AEAEB2',
-  textMuted: '#8E8E93',
-  label: '#D1D1D6',
-  inputBackground: '#2C2C2E',
-  inputText: '#F2F2F7',
-  placeholder: '#8E8E93',
-  accent: '#0A84FF',
-  active: '#30D158',
-  inactive: '#636366',
-  stop: '#FF453A',
+  background: '#000000',
+  card: '#16181C',
+  textPrimary: '#E7E9EA',
+  textSecondary: '#71767B',
+  textMuted: '#536471',
+  label: '#E7E9EA',
+  inputBackground: '#202327',
+  inputText: '#E7E9EA',
+  placeholder: '#71767B',
+  accent: '#1D9BF0',
+  active: '#00BA7C',
+  inactive: '#2F3336',
+  stop: '#F4212E',
   shadow: '#000000',
-  inline: '#C6A3A3',
-  sheet: '#1C1C1E',
-  sheetBackdrop: 'rgba(0, 0, 0, 0.6)',
-  remove: '#FF453A',
-  border: '#3A3A3C',
+  inline: '#8B6FFF',
+  sheet: '#16181C',
+  sheetBackdrop: 'rgba(91, 112, 131, 0.4)',
+  remove: '#F4212E',
+  border: '#2F3336',
 };
 

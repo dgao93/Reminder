@@ -7,10 +7,10 @@ import { QuietHours, Schedule } from './storage';
 export const DEFAULT_MESSAGE = "Don't forget!";
 export const NOTIFICATION_CATEGORY_ID = 'REMINDER';
 
+const rawAppName =
+  Constants.expoConfig?.name ?? (Constants as any).manifest?.name ?? 'Reminder';
 export const APP_NAME =
-  Constants.expoConfig?.name ??
-  (Constants as any).manifest?.name ??
-  'Never4Get';
+  rawAppName === 'Reminders by Location' ? 'Reminder' : rawAppName;
 
 type QueueOptions = {
   now?: Date;

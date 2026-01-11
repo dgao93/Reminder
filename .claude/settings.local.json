@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(ls:*)",
+      "Bash(npm install:*)"
+    ],
+    "additionalDirectories": [
+      "C:\\Users\\DG\\Desktop\\Apps\\pushups"
+    ]
+  }
+}

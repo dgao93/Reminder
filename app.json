@@ -1,6 +1,6 @@
 {
   "expo": {
-    "name": "Reminders by Location",
+    "name": "Reminder",
     "slug": "nudge",
     "version": "1.0.0",
     "orientation": "portrait",
@@ -14,12 +14,7 @@
       "buildNumber": "1",
       "supportsTablet": false,
       "infoPlist": {
-        "ITSAppUsesNonExemptEncryption": false,
-        "NSLocationWhenInUseUsageDescription": "We use your location to trigger alerts at places you name.",
-        "NSLocationAlwaysAndWhenInUseUsageDescription": "Allow \"Always\" so location alerts can fire when the app is closed.",
-        "UIBackgroundModes": [
-          "location"
-        ]
+        "ITSAppUsesNonExemptEncryption": false
       }
     },
     "web": {
@@ -27,7 +22,6 @@
       "favicon": "./assets/images/favicon.png"
     },
     "plugins": [
-      "expo-location",
       [
         "expo-splash-screen",
         {

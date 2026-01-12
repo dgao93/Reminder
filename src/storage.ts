@@ -1,12 +1,16 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
 
+export type ScheduleType = 'withinDay' | 'daily' | 'weekly' | 'monthly';
+
 export type Schedule = {
   id: string;
   name: string;
+  type: ScheduleType;
   intervalMinutes: number;
   startMinutesFromMidnight: number;
   endMinutesFromMidnight: number;
   daysOfWeek: boolean[];
+  dayOfMonth?: number;
   message: string;
   isActive: boolean;
 };
@@ -24,6 +28,7 @@ export type StoredSettings = {
 
 const STORAGE_KEY = 'intervals_settings_v2';
 const DEFAULT_DAYS = [true, true, true, true, true, true, true];
+const DEFAULT_DAY_OF_MONTH = 1;
 const DEFAULT_QUIET_HOURS: QuietHours = {
   enabled: false,
   startMinutesFromMidnight: 22 * 60,
@@ -35,6 +40,27 @@ const normalizeDaysOfWeek = (value: unknown) => {
     return [...DEFAULT_DAYS];
   }
   return value.map((entry) => Boolean(entry));
+};
+
+const normalizeScheduleType = (value: unknown): ScheduleType => {
+  if (value === 'daily' || value === 'weekly' || value === 'monthly' || value === 'withinDay') {
+    return value;
+  }
+  return 'withinDay';
+};
+
+const normalizeDayOfMonth = (value: unknown) => {
+  if (typeof value !== 'number' || !Number.isFinite(value)) {
+    return DEFAULT_DAY_OF_MONTH;
+  }
+  const normalized = Math.round(value);
+  if (normalized < 1) {
+    return 1;
+  }
+  if (normalized > 31) {
+    return 31;
+  }
+  return normalized;
 };
 
 const normalizeMinutes = (value: unknown) => {
@@ -82,17 +108,20 @@ export const loadSettings = async (): Promise<StoredSettings | null> => {
     const validSchedules = parsed.schedules
       .filter((schedule) => isValidSchedule(schedule))
       .map((schedule, index) => {
-        const normalized = schedule as Schedule;
+        const normalized = schedule as Partial<Schedule>;
+        const type = normalizeScheduleType(normalized.type);
         return {
-          id: normalized.id,
+          id: normalized.id as string,
           name:
             typeof normalized.name === 'string'
               ? normalized.name
               : `Notification ${index + 1}`,
+          type,
           intervalMinutes: normalized.intervalMinutes,
           startMinutesFromMidnight: normalized.startMinutesFromMidnight,
           endMinutesFromMidnight: normalized.endMinutesFromMidnight,
           daysOfWeek: normalizeDaysOfWeek(normalized.daysOfWeek),
+          dayOfMonth: type === 'monthly' ? normalizeDayOfMonth(normalized.dayOfMonth) : undefined,
           message: normalized.message,
           isActive:
             typeof normalized.isActive === 'boolean' ? normalized.isActive : defaultActive,
@@ -120,6 +149,14 @@ const isValidSchedule = (value: unknown) => {
   const daysValid =
     typeof schedule?.daysOfWeek === 'undefined' ||
     (Array.isArray(schedule.daysOfWeek) && schedule.daysOfWeek.length === 7);
+  const typeValid =
+    typeof schedule?.type === 'undefined' ||
+    schedule.type === 'withinDay' ||
+    schedule.type === 'daily' ||
+    schedule.type === 'weekly' ||
+    schedule.type === 'monthly';
+  const dayOfMonthValid =
+    typeof schedule?.dayOfMonth === 'undefined' || typeof schedule.dayOfMonth === 'number';
   return (
     typeof schedule?.id === 'string' &&
     typeof schedule.intervalMinutes === 'number' &&
@@ -127,6 +164,8 @@ const isValidSchedule = (value: unknown) => {
     typeof schedule.endMinutesFromMidnight === 'number' &&
     typeof schedule.message === 'string' &&
     (typeof schedule.name === 'string' || typeof schedule.name === 'undefined') &&
-    daysValid
+    daysValid &&
+    typeValid &&
+    dayOfMonthValid
   );
 };

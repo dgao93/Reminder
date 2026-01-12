@@ -25,11 +25,13 @@ type QuietHoursOptions = {
 export const buildQueue = (targetSchedules: Schedule[], options?: QueueOptions) => {
   const scheduleRules: ScheduleRule[] = targetSchedules.map((schedule) => ({
     id: schedule.id,
+    type: schedule.type ?? 'withinDay',
     intervalMinutes: schedule.intervalMinutes,
     startMinutesFromMidnight: schedule.startMinutesFromMidnight,
     endMinutesFromMidnight: schedule.endMinutesFromMidnight,
     message: schedule.message,
     daysOfWeek: schedule.daysOfWeek,
+    dayOfMonth: schedule.dayOfMonth,
   }));
 
   return buildNotificationQueue({

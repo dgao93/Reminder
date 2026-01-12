@@ -2,23 +2,33 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   Alert,
   Animated,
-  Easing,
   InteractionManager,
   Keyboard,
-  KeyboardAvoidingView,
-  Platform,
   Pressable,
   ScrollView,
   StyleSheet,
   Switch,
   Text,
   TextInput,
+  useWindowDimensions,
   View,
 } from 'react-native';
 import DateTimePicker, { DateTimePickerEvent } from '@react-native-community/datetimepicker';
 import MaterialIcons from '@expo/vector-icons/MaterialIcons';
+import MaterialCommunityIcons from '@expo/vector-icons/MaterialCommunityIcons';
 import { StatusBar } from 'expo-status-bar';
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import { Gesture, GestureDetector, GestureHandlerRootView } from 'react-native-gesture-handler';
+import Reanimated, {
+  runOnJS,
+  useAnimatedScrollHandler,
+  useAnimatedStyle,
+  useSharedValue,
+  withSpring,
+  withTiming,
+} from 'react-native-reanimated';
+import { BlurView } from 'expo-blur';
+import { LinearGradient } from 'expo-linear-gradient';
 import * as Notifications from 'expo-notifications';
 import { SafeAreaProvider, SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 
@@ -34,6 +44,7 @@ import {
   loadSettings,
   saveSettings,
   Schedule,
+  ScheduleType,
   StoredSettings,
   QuietHours,
 } from './src/storage';
@@ -41,11 +52,19 @@ import {
 const MIN_INTERVAL = 5;
 const MAX_INTERVAL = 180;
 const DEFAULT_DAYS = [true, true, true, true, true, true, true];
+const DEFAULT_DAY_OF_MONTH = 1;
 const OVERNIGHT_NOTICE_KEY = 'settings.overnightNoticeShown';
 const DAY_LABELS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
 const FONT_REGULAR = 'System';
 const FONT_MEDIUM = 'System';
 const FONT_BOLD = 'System';
+const FONT_SIZE_XS = 12;
+const FONT_SIZE_SM = 14;
+const FONT_SIZE_MD = 16;
+const FONT_SIZE_LG = 18;
+const FONT_SIZE_XL = 20;
+const FONT_SIZE_TITLE = 34;
+const FONT_SIZE_DISPLAY = 44;
 const TAB_BAR_HEIGHT = 56;
 const DEFAULT_QUIET_HOURS: QuietHours = {
   enabled: false,
@@ -57,12 +76,61 @@ const NOTIFICATION_ACTION_SNOOZE_PREFIX = 'SNOOZE_';
 const NOTIFICATION_ACTION_SKIP = 'SKIP_NEXT';
 type ScheduleResult = { count: number; error?: string };
 
+const SCHEDULE_TYPE_OPTIONS: Array<{ value: ScheduleType; label: string; helper: string }> = [
+  {
+    value: 'withinDay',
+    label: 'Interval',
+    helper: 'Multiple reminders between a start and end time.',
+  },
+  {
+    value: 'daily',
+    label: 'Daily',
+    helper: 'One reminder every day at a chosen time.',
+  },
+  {
+    value: 'weekly',
+    label: 'Weekly',
+    helper: 'Pick days of the week and a time.',
+  },
+  {
+    value: 'monthly',
+    label: 'Monthly',
+    helper: 'Pick a day of the month and a time.',
+  },
+];
+
 const getDefaultNotificationName = (index: number) => `Notification ${index + 1}`;
 const normalizeDaysOfWeek = (value?: boolean[]) => {
   if (!Array.isArray(value) || value.length !== 7) {
     return DEFAULT_DAYS;
   }
   return value.map((entry) => Boolean(entry));
+};
+
+const getScheduleType = (value?: ScheduleType): ScheduleType => value ?? 'withinDay';
+
+const clampDayOfMonth = (value: number) => {
+  if (!Number.isFinite(value)) {
+    return DEFAULT_DAY_OF_MONTH;
+  }
+  const normalized = Math.round(value);
+  if (normalized < 1) {
+    return 1;
+  }
+  if (normalized > 31) {
+    return 31;
+  }
+  return normalized;
+};
+
+const normalizeDayOfMonth = (value?: number) =>
+  clampDayOfMonth(typeof value === 'number' ? value : new Date().getDate());
+
+const getWeeklyDefaultDays = () => {
+  const today = new Date();
+  const jsDay = today.getDay();
+  const index = jsDay === 0 ? 6 : jsDay - 1;
+  return DEFAULT_DAYS.map((_, dayIndex) => dayIndex === index);
 };
 
 const areDaysEqual = (left?: boolean[], right?: boolean[]) => {
@@ -93,6 +161,44 @@ const formatDaysSummary = (daysOfWeek: boolean[]) => {
   return selected.join(', ');
 };
 
+const formatWeeklyDaysSummary = (daysOfWeek: boolean[]) => {
+  if (daysOfWeek.every(Boolean)) {
+    return 'Every day';
+  }
+  return formatDaysSummary(daysOfWeek);
+};
+
+const formatOrdinal = (value: number) => {
+  const mod100 = value % 100;
+  if (mod100 >= 11 && mod100 <= 13) {
+    return `${value}th`;
+  }
+  const mod10 = value % 10;
+  if (mod10 === 1) {
+    return `${value}st`;
+  }
+  if (mod10 === 2) {
+    return `${value}nd`;
+  }
+  if (mod10 === 3) {
+    return `${value}rd`;
+  }
+  return `${value}th`;
+};
+
+const formatDayOfMonthLabel = (dayOfMonth: number) => `${formatOrdinal(dayOfMonth)} of month`;
+
+const withAlpha = (hex: string, alpha: number) => {
+  const normalized = hex.replace('#', '');
+  if (normalized.length !== 6) {
+    return `rgba(0, 0, 0, ${alpha})`;
+  }
+  const red = Number.parseInt(normalized.slice(0, 2), 16);
+  const green = Number.parseInt(normalized.slice(2, 4), 16);
+  const blue = Number.parseInt(normalized.slice(4, 6), 16);
+  return `rgba(${red}, ${green}, ${blue}, ${alpha})`;
+};
+
 const formatTimeRangeSummary = (startMinutes: number, endMinutes: number) => {
   if (startMinutes === endMinutes) {
     return 'All day';
@@ -100,27 +206,26 @@ const formatTimeRangeSummary = (startMinutes: number, endMinutes: number) => {
   return `${formatTime(startMinutes)} - ${formatTime(endMinutes)}`;
 };
 
-const formatNotificationName = (value: string) => {
-  const trimmed = value.trim();
-  if (!trimmed) {
-    return '';
-  }
-  return trimmed.replace(/(^\\w)|(\\s+\\w)/g, (match) => match.toUpperCase());
+const createSchedule = (name: string, type: ScheduleType): Schedule => {
+  const startMinutes = 9 * 60;
+  const endMinutes = type === 'withinDay' ? 21 * 60 : startMinutes;
+  const daysOfWeek = type === 'weekly' ? getWeeklyDefaultDays() : DEFAULT_DAYS.slice();
+  return {
+    id: `${Date.now()}_${Math.random().toString(16).slice(2)}`,
+    name,
+    type,
+    intervalMinutes: 30,
+    startMinutesFromMidnight: startMinutes,
+    endMinutesFromMidnight: endMinutes,
+    daysOfWeek,
+    dayOfMonth: type === 'monthly' ? normalizeDayOfMonth() : undefined,
+    message: '',
+    isActive: false,
+  };
 };
 
-const createSchedule = (name: string): Schedule => ({
-  id: `${Date.now()}_${Math.random().toString(16).slice(2)}`,
-  name,
-  intervalMinutes: 30,
-  startMinutesFromMidnight: 9 * 60,
-  endMinutesFromMidnight: 21 * 60,
-  daysOfWeek: DEFAULT_DAYS.slice(),
-  message: '',
-  isActive: false,
-});
-
 const DEFAULT_SETTINGS: StoredSettings = {
-  schedules: [createSchedule(getDefaultNotificationName(0))],
+  schedules: [createSchedule(getDefaultNotificationName(0), 'withinDay')],
   quietHours: DEFAULT_QUIET_HOURS,
 };
 
@@ -149,12 +254,11 @@ function AppContent() {
   const [activePicker, setActivePicker] = useState<null | { scheduleId: string; kind: 'start' | 'end' }>(
     null
   );
-  const [isNamePromptOpen, setIsNamePromptOpen] = useState(false);
-  const [nameDraft, setNameDraft] = useState('');
-  const [namePromptMode, setNamePromptMode] = useState<'add' | 'edit'>('add');
-  const [namePromptScheduleId, setNamePromptScheduleId] = useState<string | null>(null);
-  const [menuScheduleId, setMenuScheduleId] = useState<string | null>(null);
-  const [collapsedSchedules, setCollapsedSchedules] = useState<string[]>([]);
+  const [isListEditing, setIsListEditing] = useState(false);
+  const [detailScheduleId, setDetailScheduleId] = useState<string | null>(null);
+  const [detailMode, setDetailMode] = useState<'add' | 'edit' | null>(null);
+  const [isDetailSheetVisible, setIsDetailSheetVisible] = useState(false);
+  const [draftSchedule, setDraftSchedule] = useState<Schedule | null>(null);
   const [hasSeenOvernightNotice, setHasSeenOvernightNotice] = useState(false);
   const [isOvernightNoticeLoaded, setIsOvernightNoticeLoaded] = useState(false);
   const [isHydrated, setIsHydrated] = useState(false);
@@ -165,18 +269,28 @@ function AppContent() {
   const previousSchedulesRef = useRef<Schedule[]>([]);
   const schedulesRef = useRef<Schedule[]>(schedules);
   const rescheduleTimers = useRef(new Map<string, ReturnType<typeof setTimeout>>());
+  const { height: windowHeight } = useWindowDimensions();
+  const detailSheetOffset = useSharedValue(windowHeight);
+  const detailScrollY = useSharedValue(0);
   const darkModeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const keyboardOffset = useRef(new Animated.Value(0)).current;
+  const [keyboardHeight, setKeyboardHeight] = useState(0);
+  const [dayOfMonthDrafts, setDayOfMonthDrafts] = useState<Record<string, string>>({});
+  const [headerHeight, setHeaderHeight] = useState(0);
+  const scrollY = useRef(new Animated.Value(0)).current;
 
   useEffect(() => {
     if (activeTab === 'home') {
       return;
     }
     setActivePicker(null);
-    setMenuScheduleId(null);
-    setIsNamePromptOpen(false);
+    setDetailScheduleId(null);
+    setDetailMode(null);
+    setDraftSchedule(null);
+    setIsDetailSheetVisible(false);
+    detailSheetOffset.value = windowHeight;
+    setIsListEditing(false);
     Keyboard.dismiss();
-  }, [activeTab]);
+  }, [activeTab, detailSheetOffset, windowHeight]);
 
   useEffect(() => {
     const hydrate = async () => {
@@ -272,9 +386,13 @@ function AppContent() {
     if (!isHydrated || !isOvernightNoticeLoaded || hasSeenOvernightNotice) {
       return;
     }
-    const hasOvernight = schedules.some((schedule) =>
-      isOvernightWindow(schedule.startMinutesFromMidnight, schedule.endMinutesFromMidnight)
-    );
+    const hasOvernight = schedules.some((schedule) => {
+      const scheduleType = getScheduleType(schedule.type);
+      if (scheduleType !== 'withinDay') {
+        return false;
+      }
+      return isOvernightWindow(schedule.startMinutesFromMidnight, schedule.endMinutesFromMidnight);
+    });
     if (!hasOvernight) {
       return;
     }
@@ -294,44 +412,14 @@ function AppContent() {
   }, [isHydrated, isOnboardingLoaded, hasSeenOnboarding]);
 
   useEffect(() => {
-    if (Platform.OS === 'ios') {
-      const sub = Keyboard.addListener('keyboardWillChangeFrame', (event) => {
-        const height = event.endCoordinates?.height ?? 0;
-        const target = Math.max(0, height + 16);
-        Animated.timing(keyboardOffset, {
-          toValue: target,
-          duration: event.duration ?? 250,
-          easing: Easing.out(Easing.cubic),
-          useNativeDriver: true,
-        }).start();
-      });
-      return () => {
-        sub.remove();
-      };
-    }
-    const showSub = Keyboard.addListener('keyboardDidShow', (event) => {
+    const sub = Keyboard.addListener('keyboardWillChangeFrame', (event) => {
       const height = event.endCoordinates?.height ?? 0;
-      const target = Math.max(0, height + 16);
-      Animated.timing(keyboardOffset, {
-        toValue: target,
-        duration: 200,
-        easing: Easing.out(Easing.cubic),
-        useNativeDriver: true,
-      }).start();
-    });
-    const hideSub = Keyboard.addListener('keyboardDidHide', () => {
-      Animated.timing(keyboardOffset, {
-        toValue: 0,
-        duration: 180,
-        easing: Easing.out(Easing.cubic),
-        useNativeDriver: true,
-      }).start();
+      setKeyboardHeight(Math.max(0, height));
     });
     return () => {
-      showSub.remove();
-      hideSub.remove();
+      sub.remove();
     };
-  }, [keyboardOffset]);
+  }, []);
 
   useEffect(() => {
     if (!isHydrated) {
@@ -355,9 +443,11 @@ function AppContent() {
         continue;
       }
       const hasChanged =
+        schedule.type !== previous.type ||
         schedule.intervalMinutes !== previous.intervalMinutes ||
         schedule.startMinutesFromMidnight !== previous.startMinutesFromMidnight ||
         schedule.endMinutesFromMidnight !== previous.endMinutesFromMidnight ||
+        schedule.dayOfMonth !== previous.dayOfMonth ||
         schedule.message !== previous.message ||
         !areDaysEqual(schedule.daysOfWeek, previous.daysOfWeek);
       if (hasChanged) {
@@ -390,9 +480,9 @@ function AppContent() {
     return false;
   };
 
-  const sendTestNotification = async (schedule: Schedule, index: number) => {
-    const scheduleName = schedule.name?.trim() || getDefaultNotificationName(index);
-    const titleSuffix = schedule.name.trim() ? ` - ${schedule.name.trim()}` : '';
+  const sendTestNotification = async (schedule: Schedule) => {
+    const trimmedName = schedule.name?.trim() ?? '';
+    const titleSuffix = trimmedName ? ` - ${trimmedName}` : '';
     const message = schedule.message.trim() || DEFAULT_MESSAGE;
     const granted =
       authorizationStatus === 'authorized' ? true : await requestAuthorization();
@@ -551,8 +641,17 @@ function AppContent() {
   }, []);
 
   const scheduleIfEligible = async (schedule: Schedule): Promise<ScheduleResult> => {
+    const horizonHours = getScheduleType(schedule.type) === 'monthly' ? 24 * 90 : 24 * 7;
     await cancelScheduleNotifications(schedule.id);
-    return scheduleNotificationsBatch([schedule], { quietHours });
+    return scheduleNotificationsBatch([schedule], { quietHours, horizonHours });
+  };
+
+  const getEmptyScheduleMessage = (schedule: Schedule) => {
+    const horizonDays = getScheduleType(schedule.type) === 'monthly' ? 90 : 7;
+    if (quietHours.enabled) {
+      return 'No alerts outside quiet hours. Adjust the time or quiet hours.';
+    }
+    return `No alerts in the next ${horizonDays} days. Adjust the schedule.`;
   };
 
   const updateQuietHours = (patch: Partial<QuietHours>) => {
@@ -608,11 +707,7 @@ function AppContent() {
         return;
       }
       if (result.count === 0) {
-        setInlineMessage(
-          quietHours.enabled
-            ? 'No alerts outside quiet hours. Adjust the window or quiet hours.'
-            : 'No alerts in the next 7 days. Adjust the window.'
-        );
+        setInlineMessage(getEmptyScheduleMessage(schedule));
         if (!preserveActive) {
           setScheduleActive(schedule.id, false);
         }
@@ -661,11 +756,7 @@ function AppContent() {
         return;
       }
       if (result.count === 0) {
-        setInlineMessage(
-          quietHours.enabled
-            ? 'No alerts outside quiet hours. Adjust the window or quiet hours.'
-            : 'No alerts in the next 7 days. Adjust the window.'
-        );
+        setInlineMessage(getEmptyScheduleMessage(schedule));
         setScheduleActive(scheduleId, false);
         return;
       }
@@ -688,6 +779,10 @@ function AppContent() {
   };
 
   const updateSchedule = (id: string, patch: Partial<Schedule>) => {
+    if (draftSchedule?.id === id) {
+      setDraftSchedule((current) => (current ? { ...current, ...patch } : current));
+      return;
+    }
     setSchedules((current) =>
       current.map((schedule) =>
         schedule.id === id ? { ...schedule, ...patch } : schedule
@@ -696,6 +791,18 @@ function AppContent() {
   };
 
   const stepInterval = (id: string, direction: 1 | -1) => {
+    if (draftSchedule?.id === id) {
+      setDraftSchedule((current) => {
+        if (!current) {
+          return current;
+        }
+        const next = current.intervalMinutes + direction * 5;
+        const nextInterval = Math.min(MAX_INTERVAL, Math.max(MIN_INTERVAL, next));
+        setIntervalDrafts((drafts) => ({ ...drafts, [id]: String(nextInterval) }));
+        return { ...current, intervalMinutes: nextInterval };
+      });
+      return;
+    }
     setSchedules((current) =>
       current.map((schedule) => {
         if (schedule.id !== id) {
@@ -719,7 +826,7 @@ function AppContent() {
 
   const commitIntervalDraft = (id: string) => {
     const draft = intervalDrafts[id];
-    const schedule = schedules.find((item) => item.id === id);
+    const schedule = draftSchedule?.id === id ? draftSchedule : schedules.find((item) => item.id === id);
     if (!schedule) {
       return;
     }
@@ -733,7 +840,72 @@ function AppContent() {
     updateSchedule(id, { intervalMinutes: next });
   };
 
+  const stepDayOfMonth = (id: string, direction: 1 | -1) => {
+    if (draftSchedule?.id === id) {
+      setDraftSchedule((current) => {
+        if (!current) {
+          return current;
+        }
+        const currentDay = normalizeDayOfMonth(current.dayOfMonth);
+        const nextDay = clampDayOfMonth(currentDay + direction);
+        setDayOfMonthDrafts((drafts) => ({ ...drafts, [id]: String(nextDay) }));
+        return {
+          ...current,
+          dayOfMonth: nextDay,
+        };
+      });
+      return;
+    }
+    setSchedules((current) =>
+      current.map((schedule) => {
+        if (schedule.id !== id) {
+          return schedule;
+        }
+        const currentDay = normalizeDayOfMonth(schedule.dayOfMonth);
+        const nextDay = clampDayOfMonth(currentDay + direction);
+        setDayOfMonthDrafts((drafts) => ({ ...drafts, [id]: String(nextDay) }));
+        return {
+          ...schedule,
+          dayOfMonth: nextDay,
+        };
+      })
+    );
+  };
+
+  const updateDayOfMonthDraft = (id: string, value: string) => {
+    const sanitized = value.replace(/[^0-9]/g, '');
+    setDayOfMonthDrafts((current) => ({ ...current, [id]: sanitized }));
+  };
+
+  const commitDayOfMonthDraft = (id: string) => {
+    const draft = dayOfMonthDrafts[id];
+    const schedule = draftSchedule?.id === id ? draftSchedule : schedules.find((item) => item.id === id);
+    if (!schedule) {
+      return;
+    }
+    const parsed = Number(draft);
+    if (!Number.isFinite(parsed)) {
+      const fallback = normalizeDayOfMonth(schedule.dayOfMonth);
+      setDayOfMonthDrafts((current) => ({ ...current, [id]: String(fallback) }));
+      return;
+    }
+    const nextDay = clampDayOfMonth(parsed);
+    setDayOfMonthDrafts((current) => ({ ...current, [id]: String(nextDay) }));
+    updateSchedule(id, { dayOfMonth: nextDay });
+  };
+
   const toggleScheduleDay = (id: string, dayIndex: number) => {
+    if (draftSchedule?.id === id) {
+      setDraftSchedule((current) => {
+        if (!current) {
+          return current;
+        }
+        const nextDays = [...normalizeDaysOfWeek(current.daysOfWeek)];
+        nextDays[dayIndex] = !nextDays[dayIndex];
+        return { ...current, daysOfWeek: nextDays };
+      });
+      return;
+    }
     setSchedules((current) =>
       current.map((schedule) => {
         if (schedule.id !== id) {
@@ -746,105 +918,155 @@ function AppContent() {
     );
   };
 
-  const toggleScheduleCollapse = (id: string) => {
-    setCollapsedSchedules((current) =>
-      current.includes(id) ? current.filter((entry) => entry !== id) : [...current, id]
-    );
+  const clearDraftInputs = (id: string) => {
+    setIntervalDrafts((current) => {
+      const { [id]: _, ...rest } = current;
+      return rest;
+    });
+    setDayOfMonthDrafts((current) => {
+      const { [id]: _, ...rest } = current;
+      return rest;
+    });
+  };
+
+  const presentDetailSheet = () => {
+    setIsDetailSheetVisible(true);
+    detailScrollY.value = 0;
+    detailSheetOffset.value = windowHeight;
+    detailSheetOffset.value = withTiming(0, { duration: 260 });
+  };
+
+  const finalizeDetailClose = (
+    action: 'discard' | 'save',
+    mode: 'add' | 'edit' | null,
+    draftId?: string
+  ) => {
+    if (action === 'discard' && mode === 'add' && draftId) {
+      clearDraftInputs(draftId);
+    }
+    setDraftSchedule(null);
+    setIsDetailSheetVisible(false);
+    setDetailScheduleId(null);
+    setDetailMode(null);
+  };
+
+  const closeDetailSheet = (action: 'discard' | 'save') => {
+    const mode = detailMode;
+    const draftId = draftSchedule?.id;
+    detailSheetOffset.value = withTiming(windowHeight, { duration: 220 }, (finished) => {
+      if (finished) {
+        runOnJS(finalizeDetailClose)(action, mode, draftId);
+      }
+    });
   };
 
   const addSchedule = () => {
     setActivePicker(null);
-    if (Platform.OS === 'ios') {
-      Alert.prompt(
-        'New notification',
-        undefined,
-        [
-          { text: 'Cancel', style: 'cancel' },
-          {
-            text: 'Add',
-            onPress: (text) => {
-              const formatted = formatNotificationName(text ?? '');
-              if (!formatted) {
-                return;
-              }
-              setSchedules((current) => [...current, createSchedule(formatted)]);
-            },
-          },
-        ],
-        'plain-text'
-      );
-      return;
+    setIsListEditing(false);
+    const newSchedule = createSchedule('Reminder', 'withinDay');
+    setDraftSchedule(newSchedule);
+    setIntervalDrafts((current) => ({
+      ...current,
+      [newSchedule.id]: String(newSchedule.intervalMinutes),
+    }));
+    if (newSchedule.dayOfMonth) {
+      setDayOfMonthDrafts((current) => ({
+        ...current,
+        [newSchedule.id]: String(newSchedule.dayOfMonth),
+      }));
     }
-    setNameDraft('');
-    setNamePromptMode('add');
-    setNamePromptScheduleId(null);
-    setIsNamePromptOpen(true);
+    setDetailScheduleId(newSchedule.id);
+    setDetailMode('add');
+    presentDetailSheet();
   };
 
-  const editScheduleName = (schedule: Schedule) => {
-    if (Platform.OS === 'ios') {
-      Alert.prompt(
-        'Edit notification',
-        undefined,
-        [
-          { text: 'Cancel', style: 'cancel' },
-          {
-            text: 'Save',
-            onPress: (text) => {
-              const formatted = formatNotificationName(text ?? '');
-              if (!formatted) {
-                return;
-              }
-              updateSchedule(schedule.id, { name: formatted });
-            },
-          },
-        ],
-        'plain-text',
-        schedule.name
-      );
+  const openScheduleDetail = (scheduleId: string) => {
+    setIsListEditing(false);
+    const schedule = schedules.find((item) => item.id === scheduleId);
+    if (!schedule) {
       return;
     }
-    setNameDraft(schedule.name);
-    setNamePromptMode('edit');
-    setNamePromptScheduleId(schedule.id);
-    setIsNamePromptOpen(true);
-  };
-
-  const duplicateSchedule = (schedule: Schedule) => {
-    const baseName = schedule.name?.trim() || getDefaultNotificationName(schedules.length);
-    const nextName = `${baseName} copy`;
-    const newSchedule: Schedule = {
+    setDraftSchedule({
       ...schedule,
-      id: `${Date.now()}_${Math.random().toString(16).slice(2)}`,
-      name: nextName,
-      isActive: false,
-    };
-    setSchedules((current) => [...current, newSchedule]);
-    setInlineMessage(`Duplicated "${baseName}".`);
-  };
-
-  const closeMenu = () => {
-    setMenuScheduleId(null);
-  };
-
-  const closeNamePrompt = () => {
-    Keyboard.dismiss();
-    setNamePromptScheduleId(null);
-    setIsNamePromptOpen(false);
-  };
-
-  const confirmNamePrompt = () => {
-    const formatted = formatNotificationName(nameDraft);
-    if (!formatted) {
-      return;
+      daysOfWeek: normalizeDaysOfWeek(schedule.daysOfWeek),
+    });
+    setIntervalDrafts((current) => ({
+      ...current,
+      [schedule.id]: String(schedule.intervalMinutes),
+    }));
+    if (schedule.dayOfMonth) {
+      setDayOfMonthDrafts((current) => ({
+        ...current,
+        [schedule.id]: String(schedule.dayOfMonth),
+      }));
     }
-    if (namePromptMode === 'add') {
-      setSchedules((current) => [...current, createSchedule(formatted)]);
-    } else if (namePromptMode === 'edit' && namePromptScheduleId) {
-      updateSchedule(namePromptScheduleId, { name: formatted });
-    }
-    closeNamePrompt();
+    setDetailScheduleId(scheduleId);
+    setDetailMode('edit');
+    presentDetailSheet();
   };
+
+  const saveScheduleDetail = () => {
+    if (draftSchedule) {
+      if (detailMode === 'add') {
+        setSchedules((current) => [...current, draftSchedule]);
+      } else {
+        setSchedules((current) =>
+          current.map((schedule) =>
+            schedule.id === draftSchedule.id ? draftSchedule : schedule
+          )
+        );
+      }
+    }
+    closeDetailSheet('save');
+  };
+
+  const detailScrollHandler = useAnimatedScrollHandler({
+    onScroll: (event) => {
+      detailScrollY.value = event.contentOffset.y;
+    },
+  });
+
+  const detailSheetAnimatedStyle = useAnimatedStyle(
+    () => ({
+      transform: [{ translateY: detailSheetOffset.value }],
+    }),
+    []
+  );
+
+  const detailBackdropAnimatedStyle = useAnimatedStyle(
+    () => ({
+      opacity: 1 - Math.min(detailSheetOffset.value / windowHeight, 1),
+    }),
+    [windowHeight]
+  );
+
+  const detailPanGesture = useMemo(
+    () =>
+      Gesture.Pan()
+        .onUpdate((event) => {
+          if (detailScrollY.value > 0) {
+            return;
+          }
+          if (event.translationY > 0) {
+            detailSheetOffset.value = event.translationY;
+          } else {
+            detailSheetOffset.value = 0;
+          }
+        })
+        .onEnd((event) => {
+          if (detailScrollY.value > 0) {
+            detailSheetOffset.value = withSpring(0, { damping: 28, stiffness: 280 });
+            return;
+          }
+          const shouldClose = event.translationY > 120 || event.velocityY > 1200;
+          if (shouldClose) {
+            runOnJS(closeDetailSheet)('discard');
+          } else {
+            detailSheetOffset.value = withSpring(0, { damping: 28, stiffness: 280 });
+          }
+        }),
+    [closeDetailSheet, detailScrollY, detailSheetOffset]
+  );
 
   const removeSchedule = async (id: string) => {
     clearRescheduleTimer(id);
@@ -855,8 +1077,11 @@ function AppContent() {
     }
     setActivePicker((current) => (current?.scheduleId === id ? null : current));
     setSchedules((current) => current.filter((schedule) => schedule.id !== id));
-    setCollapsedSchedules((current) => current.filter((entry) => entry !== id));
     setIntervalDrafts((current) => {
+      const { [id]: _, ...rest } = current;
+      return rest;
+    });
+    setDayOfMonthDrafts((current) => {
       const { [id]: _, ...rest } = current;
       return rest;
     });
@@ -866,8 +1091,21 @@ function AppContent() {
     if (!activePicker || activePicker.scheduleId === 'quiet') {
       return null;
     }
+    if (draftSchedule && activePicker.scheduleId === draftSchedule.id) {
+      return draftSchedule;
+    }
     return schedules.find((schedule) => schedule.id === activePicker.scheduleId) ?? null;
-  }, [activePicker, schedules]);
+  }, [activePicker, draftSchedule, schedules]);
+
+  const detailSchedule = useMemo(() => {
+    if (draftSchedule) {
+      return draftSchedule;
+    }
+    if (!detailScheduleId) {
+      return null;
+    }
+    return schedules.find((schedule) => schedule.id === detailScheduleId) ?? null;
+  }, [detailScheduleId, draftSchedule, schedules]);
 
   const activePickerDate = useMemo(() => {
     if (!activePicker) {
@@ -890,10 +1128,79 @@ function AppContent() {
     return minutesToDate(minutes);
   }, [activePicker, activeSchedule, quietHours]);
 
-  const canConfirmName = nameDraft.trim().length > 0;
-  const isEditingName = namePromptMode === 'edit';
-  const namePromptTitle = isEditingName ? 'Edit notification' : 'New notification';
-  const namePromptPlaceholder = 'Notification name';
+  const fadeHeight = Math.max(45, Math.round(windowHeight * 0.075));
+  const hasSchedules = schedules.length > 0;
+  const fadeColors = [
+    withAlpha(colors.background, 1),
+    withAlpha(colors.background, 0.55),
+    withAlpha(colors.background, 0),
+  ];
+  const bottomFadeColors = [
+    withAlpha(colors.background, 0),
+    withAlpha(colors.background, 0.55),
+    withAlpha(colors.background, 1),
+  ];
+  const fadeLocations = [0, 0.5, 1];
+  const glassBlurIntensity = colorScheme === 'dark' ? 20 : 28;
+  const glassCard = withAlpha(colors.card, colorScheme === 'dark' ? 0.5 : 0.78);
+  const glassSheet = withAlpha(colors.sheet, colorScheme === 'dark' ? 0.55 : 0.8);
+  const glassBorder = withAlpha(colors.border, colorScheme === 'dark' ? 0.7 : 0.6);
+  const headerButtonBorder = withAlpha(colors.shadow, colorScheme === 'dark' ? 0.6 : 0.35);
+  const glassHeader = withAlpha(colors.background, colorScheme === 'dark' ? 0.6 : 0.75);
+  const glassHighlightStrong = withAlpha('#FFFFFF', colorScheme === 'dark' ? 0.12 : 0.28);
+  const glassHighlightSoft = withAlpha('#FFFFFF', colorScheme === 'dark' ? 0.04 : 0.12);
+  const glassHighlightFade = withAlpha('#FFFFFF', 0);
+  const contentBottomPadding = keyboardHeight > 0 ? 0 : TAB_BAR_HEIGHT + insets.bottom + 4;
+  const detailScheduleType = detailSchedule ? getScheduleType(detailSchedule.type) : 'daily';
+  const detailScheduleDays = detailSchedule
+    ? normalizeDaysOfWeek(detailSchedule.daysOfWeek)
+    : DEFAULT_DAYS;
+  const detailIntervalValue = detailSchedule
+    ? intervalDrafts[detailSchedule.id] ?? String(detailSchedule.intervalMinutes)
+    : '';
+  const detailDayOfMonthValue = detailSchedule
+    ? dayOfMonthDrafts[detailSchedule.id] ?? String(normalizeDayOfMonth(detailSchedule.dayOfMonth))
+    : '';
+  const detailTypeOption = SCHEDULE_TYPE_OPTIONS.find(
+    (option) => option.value === detailScheduleType
+  );
+  const detailSheetHeight = Math.round(
+    Math.min(windowHeight * 0.82, windowHeight - insets.top - 24) * 0.92
+  );
+
+  const updateScheduleType = (schedule: Schedule, nextType: ScheduleType) => {
+    if (schedule.type === nextType) {
+      return;
+    }
+    const currentDays = normalizeDaysOfWeek(schedule.daysOfWeek);
+    const hasSelectedDays = currentDays.some(Boolean);
+    const nextDays =
+      nextType === 'weekly'
+        ? hasSelectedDays
+          ? currentDays
+          : getWeeklyDefaultDays()
+        : DEFAULT_DAYS.slice();
+    const nextDayOfMonth =
+      nextType === 'monthly' ? normalizeDayOfMonth(schedule.dayOfMonth) : undefined;
+    const nextEndMinutes =
+      nextType === 'withinDay'
+        ? schedule.type === 'withinDay'
+          ? schedule.endMinutesFromMidnight
+          : Math.min(schedule.startMinutesFromMidnight + 8 * 60, 23 * 60 + 59)
+        : schedule.startMinutesFromMidnight;
+    updateSchedule(schedule.id, {
+      type: nextType,
+      daysOfWeek: nextDays,
+      dayOfMonth: nextDayOfMonth,
+      endMinutesFromMidnight: nextEndMinutes,
+    });
+  };
+  const fadeOpacity = scrollY.interpolate({
+    inputRange: [12, 36],
+    outputRange: [0, 1],
+    extrapolate: 'clamp',
+  });
+
 
   const onPickerChange = (_: DateTimePickerEvent, selected?: Date) => {
     if (!selected || !activePicker) {
@@ -909,7 +1216,15 @@ function AppContent() {
       return;
     }
     if (activePicker.kind === 'start') {
-      updateSchedule(activePicker.scheduleId, { startMinutesFromMidnight: minutes });
+      const activeType = activeSchedule ? getScheduleType(activeSchedule.type) : 'daily';
+      if (activeType === 'withinDay') {
+        updateSchedule(activePicker.scheduleId, { startMinutesFromMidnight: minutes });
+      } else {
+        updateSchedule(activePicker.scheduleId, {
+          startMinutesFromMidnight: minutes,
+          endMinutesFromMidnight: minutes,
+        });
+      }
     } else {
       updateSchedule(activePicker.scheduleId, { endMinutesFromMidnight: minutes });
     }
@@ -921,290 +1236,251 @@ function AppContent() {
       clearTimeout(darkModeTimerRef.current);
       darkModeTimerRef.current = null;
     }
-    if (Platform.OS === 'ios') {
-      darkModeTimerRef.current = setTimeout(() => {
-        setDarkMode(value);
-      }, 200);
-      return;
-    }
-    setDarkMode(value);
+    darkModeTimerRef.current = setTimeout(() => {
+      setDarkMode(value);
+    }, 200);
   };
 
   return (
     <SafeAreaView edges={['top']} style={[styles.safeArea, { backgroundColor: colors.background }]}>
       <StatusBar style={colorScheme === 'dark' ? 'light' : 'dark'} backgroundColor={colors.background} />
       {activeTab === 'home' ? (
-        <KeyboardAvoidingView
-        behavior={Platform.OS === 'ios' ? 'padding' : undefined}
-        keyboardVerticalOffset={Platform.OS === 'ios' ? 80 : 0}
-        style={styles.flex}
-      >
-        <ScrollView
-          style={styles.scroll}
-          contentContainerStyle={[styles.container, { backgroundColor: colors.background }]}
-          keyboardShouldPersistTaps="handled"
-          keyboardDismissMode="interactive"
-          contentInsetAdjustmentBehavior="always"
-          automaticallyAdjustKeyboardInsets
-          showsVerticalScrollIndicator={false}
+        <View style={styles.flex}>
+        <View
+          style={[
+            styles.headerBar,
+            { backgroundColor: glassHeader, borderColor: glassBorder },
+          ]}
+          onLayout={(event) => setHeaderHeight(event.nativeEvent.layout.height)}
         >
-          <View style={styles.titleRow}>
-            <Text style={[styles.title, { color: colors.textPrimary }]}>Notifications</Text>
+          <BlurView
+            intensity={glassBlurIntensity}
+            tint={colorScheme === 'dark' ? 'dark' : 'light'}
+            style={[
+              StyleSheet.absoluteFillObject,
+              { borderBottomLeftRadius: 18, borderBottomRightRadius: 18 },
+            ]}
+            pointerEvents="none"
+          />
+          <LinearGradient
+            colors={[glassHighlightStrong, glassHighlightSoft, glassHighlightFade]}
+            locations={[0, 0.45, 1]}
+            start={{ x: 0, y: 0 }}
+            end={{ x: 0, y: 1 }}
+            style={[
+              StyleSheet.absoluteFillObject,
+              { borderBottomLeftRadius: 18, borderBottomRightRadius: 18 },
+            ]}
+            pointerEvents="none"
+          />
+          <View style={styles.headerActions}>
+            <Pressable
+              style={[
+                styles.headerActionButton,
+                { borderColor: headerButtonBorder, backgroundColor: colors.inputBackground },
+              ]}
+              onPress={() => setIsListEditing((current) => !current)}
+              accessibilityRole="button"
+              accessibilityLabel={isListEditing ? 'Done' : 'Edit reminders'}
+            >
+              <Text style={[styles.headerActionText, { color: colors.accent }]}>
+                {isListEditing ? 'Done' : 'Edit'}
+              </Text>
+            </Pressable>
             <Pressable
               style={[
                 styles.addButton,
-                { backgroundColor: colors.inputBackground, borderColor: colors.border },
+                { backgroundColor: colors.inputBackground, borderColor: headerButtonBorder },
               ]}
               onPress={addSchedule}
               accessibilityRole="button"
-              accessibilityLabel="Add notification"
+              accessibilityLabel="Add reminder"
               hitSlop={8}
             >
               <MaterialIcons name="add" size={22} color={colors.accent} />
             </Pressable>
           </View>
-
-          {schedules.map((schedule, index) => {
-            const startLabel = formatTime(schedule.startMinutesFromMidnight);
-            const endLabel = formatTime(schedule.endMinutesFromMidnight);
-            const daysOfWeek = normalizeDaysOfWeek(schedule.daysOfWeek);
-            const isOvernight = isOvernightWindow(
-              schedule.startMinutesFromMidnight,
-              schedule.endMinutesFromMidnight
-            );
-            const daysSummary = formatDaysSummary(daysOfWeek);
-            const timeSummary = formatTimeRangeSummary(
-              schedule.startMinutesFromMidnight,
-              schedule.endMinutesFromMidnight
-            );
-            const summary = `${daysSummary} | ${timeSummary} | Every ${schedule.intervalMinutes} min`;
-            const isCollapsed = collapsedSchedules.includes(schedule.id);
-            const scheduleDisplayName =
-              schedule.name?.trim() || getDefaultNotificationName(index);
-            return (
-              <View
-                key={schedule.id}
-                style={[
-                  styles.card,
-                  {
-                    backgroundColor: colors.card,
-                    shadowColor: colors.shadow,
-                    borderColor: schedule.isActive ? colors.accent : colors.border,
-                    shadowOpacity: schedule.isActive ? 0.12 : 0.04,
-                  },
-                ]}
+          <Text style={[styles.title, { color: colors.textPrimary }]}>Reminders</Text>
+        </View>
+        <Animated.ScrollView
+          style={styles.scroll}
+          contentContainerStyle={[
+            styles.container,
+            {
+              backgroundColor: colors.background,
+              paddingTop: hasSchedules ? 18 : 0,
+              paddingBottom: hasSchedules ? contentBottomPadding : 0,
+              minHeight: keyboardHeight > 0 ? 0 : '100%',
+              flexGrow: hasSchedules ? 0 : 1,
+              justifyContent: hasSchedules ? 'flex-start' : 'center',
+            },
+          ]}
+          keyboardShouldPersistTaps="handled"
+          keyboardDismissMode="interactive"
+          contentInsetAdjustmentBehavior="always"
+          automaticallyAdjustKeyboardInsets
+          showsVerticalScrollIndicator={false}
+          scrollEventThrottle={16}
+          onScroll={Animated.event(
+            [{ nativeEvent: { contentOffset: { y: scrollY } } }],
+            { useNativeDriver: true }
+          )}
+        >
+          {!hasSchedules ? (
+            <View style={styles.emptyState}>
+              <Text style={[styles.emptyStateTitle, { color: colors.textPrimary }]}>
+                No reminders yet
+              </Text>
+              <Pressable
+                style={[styles.emptyStateButton, { backgroundColor: colors.accent }]}
+                onPress={addSchedule}
+                accessibilityRole="button"
+                accessibilityLabel="Create a reminder"
               >
-                <View style={styles.cardHeader}>
-                  <Pressable
-                    style={styles.cardTitleButton}
-                    onPress={() => toggleScheduleCollapse(schedule.id)}
-                  >
-                    <Text style={[styles.cardTitleInput, { color: colors.textPrimary }]}>
-                      {scheduleDisplayName}
-                    </Text>
-                    <View
-                      style={[
-                        styles.chevron,
-                        { transform: [{ rotate: isCollapsed ? '0deg' : '180deg' }] },
-                      ]}
-                    >
-                      <View
-                        style={[
-                          styles.chevronLine,
-                          styles.chevronLeft,
-                          { backgroundColor: colors.textSecondary },
-                        ]}
-                      />
-                      <View
-                        style={[
-                          styles.chevronLine,
-                          styles.chevronRight,
-                          { backgroundColor: colors.textSecondary },
-                        ]}
-                      />
-                    </View>
-                  </Pressable>
-                  <View style={styles.cardHeaderActions}>
-                    <Pressable
-                      style={[
-                        styles.toggleButton,
-                        { backgroundColor: schedule.isActive ? colors.active : colors.inactive },
-                      ]}
-                      onPress={() =>
-                        schedule.isActive
-                          ? void onStopSchedule(schedule.id)
-                          : void onStartSchedule(schedule.id)
-                      }
-                    >
-                      <Text style={styles.toggleButtonLabel}>
-                        {schedule.isActive ? 'Active' : 'Inactive'}
-                      </Text>
-                    </Pressable>
-                    <Pressable onPress={() => setMenuScheduleId(schedule.id)} hitSlop={10}>
-                      <Text style={[styles.menuLabel, { color: colors.textSecondary }]}>...</Text>
-                    </Pressable>
-                  </View>
-                </View>
+                <Text style={styles.emptyStateButtonLabel}>Create a reminder</Text>
+              </Pressable>
+            </View>
+          ) : null}
 
-                <Text style={[styles.cardSummary, { color: colors.textSecondary }]}>
-                  {summary}
-                </Text>
-
-                <View style={styles.messageBlock}>
-                  <Text style={[styles.messageLabel, { color: colors.label }]}>Message</Text>
-                  <TextInput
-                    value={schedule.message}
-                    onChangeText={(text) => updateSchedule(schedule.id, { message: text })}
-                    placeholder={DEFAULT_MESSAGE}
-                    placeholderTextColor={colors.placeholder}
+          {hasSchedules ? (
+            <View
+              style={[
+                styles.alarmList,
+                {
+                  backgroundColor: glassCard,
+                  borderColor: glassBorder,
+                  shadowColor: colors.shadow,
+                },
+              ]}
+            >
+              <BlurView
+                intensity={glassBlurIntensity}
+                tint={colorScheme === 'dark' ? 'dark' : 'light'}
+                style={[StyleSheet.absoluteFillObject, { borderRadius: 22 }]}
+                pointerEvents="none"
+              />
+              <LinearGradient
+                colors={[glassHighlightStrong, glassHighlightSoft, glassHighlightFade]}
+                locations={[0, 0.5, 1]}
+                start={{ x: 0, y: 0 }}
+                end={{ x: 0, y: 1 }}
+                style={[StyleSheet.absoluteFillObject, { borderRadius: 22 }]}
+                pointerEvents="none"
+              />
+              {schedules.map((schedule, index) => {
+                const scheduleType = getScheduleType(schedule.type);
+                const startLabel = formatTime(schedule.startMinutesFromMidnight);
+                const daysOfWeek = normalizeDaysOfWeek(schedule.daysOfWeek);
+                const dayOfMonth = normalizeDayOfMonth(schedule.dayOfMonth);
+                const timeSummary =
+                  scheduleType === 'withinDay'
+                    ? formatTimeRangeSummary(
+                        schedule.startMinutesFromMidnight,
+                        schedule.endMinutesFromMidnight
+                      )
+                    : startLabel;
+                const summary =
+                  scheduleType === 'withinDay'
+                    ? `${formatDaysSummary(daysOfWeek)} • ${timeSummary} • Every ${schedule.intervalMinutes} min`
+                    : scheduleType === 'daily'
+                      ? 'Daily'
+                      : scheduleType === 'weekly'
+                        ? `Weekly • ${formatWeeklyDaysSummary(daysOfWeek)}`
+                        : `Monthly • ${formatDayOfMonthLabel(dayOfMonth)}`;
+                const scheduleDisplayName =
+                  schedule.name?.trim() || getDefaultNotificationName(index);
+                const isLast = index === schedules.length - 1;
+                return (
+                  <View
+                    key={schedule.id}
                     style={[
-                      styles.messageInput,
-                      {
-                        backgroundColor: colors.inputBackground,
-                        color: colors.inputText,
-                        borderColor: colors.border,
-                      },
+                      styles.alarmRow,
+                      !isLast && { borderBottomColor: colors.border, borderBottomWidth: 1 },
                     ]}
-                    maxLength={120}
-                    clearButtonMode="while-editing"
-                    returnKeyType="done"
-                    onSubmitEditing={Keyboard.dismiss}
-                  />
-                </View>
-                <View style={styles.cardActionRow}>
-                  <Pressable
-                    style={[
-                      styles.testButton,
-                      { borderColor: colors.border, backgroundColor: colors.inputBackground },
-                    ]}
-                    onPress={() => void sendTestNotification(schedule, index)}
-                    accessibilityRole="button"
-                    accessibilityLabel={`Send test notification for ${scheduleDisplayName}`}
                   >
-                    <Text style={[styles.testButtonLabel, { color: colors.textPrimary }]}>
-                      Test notification
-                    </Text>
-                  </Pressable>
-                </View>
-
-                {!isCollapsed ? (
-                  <>
-                    <View style={[styles.divider, { backgroundColor: colors.border }]} />
-
-                    <View
-                      style={[
-                        styles.intervalRow,
-                        { backgroundColor: colors.inputBackground, borderColor: colors.border },
-                      ]}
-                    >
+                    {isListEditing ? (
                       <Pressable
-                        style={[
-                          styles.stepperButton,
-                          { backgroundColor: colors.accent, borderColor: colors.accent },
-                        ]}
-                        onPress={() => stepInterval(schedule.id, -1)}
+                        style={styles.alarmDelete}
+                        onPress={() => void removeSchedule(schedule.id)}
+                        accessibilityRole="button"
+                        accessibilityLabel={`Delete ${scheduleDisplayName}`}
                       >
-                        <Text style={styles.stepperLabel}>-</Text>
+                        <View style={[styles.alarmDeleteBadge, { backgroundColor: colors.remove }]}>
+                          <Text style={styles.alarmDeleteText}>-</Text>
+                        </View>
                       </Pressable>
-                      <View style={styles.intervalInputGroup}>
-                        <TextInput
-                          value={intervalDrafts[schedule.id] ?? String(schedule.intervalMinutes)}
-                          onChangeText={(value) => updateIntervalDraft(schedule.id, value)}
-                          onBlur={() => commitIntervalDraft(schedule.id)}
-                          onSubmitEditing={() => commitIntervalDraft(schedule.id)}
-                          keyboardType="number-pad"
-                          returnKeyType="done"
-                          style={[
-                            styles.intervalInput,
-                            { color: colors.textPrimary, borderColor: colors.border },
-                          ]}
-                        />
-                        <Text style={[styles.intervalUnit, { color: colors.textSecondary }]}>
-                          min
-                        </Text>
-                      </View>
-                      <Pressable
-                        style={[
-                          styles.stepperButton,
-                          { backgroundColor: colors.accent, borderColor: colors.accent },
-                        ]}
-                        onPress={() => stepInterval(schedule.id, 1)}
-                      >
-                        <Text style={styles.stepperLabel}>+</Text>
-                      </Pressable>
-                    </View>
-
+                    ) : null}
                     <Pressable
-                      style={[
-                        styles.timeRow,
-                        { backgroundColor: colors.inputBackground, borderColor: colors.border },
-                      ]}
-                      onPress={() =>
-                        setActivePicker({ scheduleId: schedule.id, kind: 'start' })
-                      }
+                      style={styles.alarmRowMain}
+                      onPress={() => openScheduleDetail(schedule.id)}
+                      accessibilityRole="button"
+                      accessibilityLabel={`Edit ${scheduleDisplayName}`}
                     >
-                      <Text style={[styles.timeLabel, { color: colors.label }]}>Start</Text>
-                      <Text style={[styles.timeValue, { color: colors.textPrimary }]}>
+                      <Text style={[styles.alarmTime, { color: colors.textPrimary }]}>
                         {startLabel}
                       </Text>
-                    </Pressable>
-
-                    <Pressable
-                      style={[
-                        styles.timeRow,
-                        { backgroundColor: colors.inputBackground, borderColor: colors.border },
-                      ]}
-                      onPress={() => setActivePicker({ scheduleId: schedule.id, kind: 'end' })}
-                    >
-                      <Text style={[styles.timeLabel, { color: colors.label }]}>End</Text>
-                      <Text style={[styles.timeValue, { color: colors.textPrimary }]}>
-                        {endLabel}
+                      <Text style={[styles.alarmLabel, { color: colors.textSecondary }]}>
+                        {scheduleDisplayName}
+                      </Text>
+                      <Text style={[styles.alarmSubtext, { color: colors.textMuted }]}>
+                        {summary}
                       </Text>
                     </Pressable>
-
-                    <View style={styles.dayRow}>
-                      {DAY_LABELS.map((label, dayIndex) => {
-                        const isSelected = daysOfWeek[dayIndex];
-                        return (
-                          <Pressable
-                            key={`${schedule.id}-${label}`}
-                            style={[
-                              styles.dayButton,
-                              {
-                                backgroundColor: isSelected ? colors.accent : colors.inputBackground,
-                                borderColor: isSelected ? colors.accent : colors.border,
-                              },
-                            ]}
-                            onPress={() => toggleScheduleDay(schedule.id, dayIndex)}
-                          >
-                            <Text
-                              style={[
-                                styles.dayLabel,
-                                { color: isSelected ? '#FFFFFF' : colors.textSecondary },
-                              ]}
-                            >
-                              {label}
-                            </Text>
-                          </Pressable>
-                        );
-                      })}
-                    </View>
-
-                    {isOvernight ? (
-                      <Text style={[styles.helperText, { color: colors.textMuted }]}>
-                        Overnight window. Alerts after midnight count as the next day. Example:
-                        Mon 9:00 PM - 6:00 AM needs Tue selected for after-midnight alerts.
-                      </Text>
+                    {!isListEditing ? (
+                      <Switch
+                        value={schedule.isActive}
+                        onValueChange={(value) =>
+                          value ? void onStartSchedule(schedule.id) : void onStopSchedule(schedule.id)
+                        }
+                        trackColor={{ false: colors.border, true: colors.accent }}
+                        ios_backgroundColor={colors.border}
+                      />
                     ) : null}
+                  </View>
+                );
+              })}
+            </View>
+          ) : null}
 
-                  </>
-                ) : null}
-              </View>
-            );
-          })}
-
-        </ScrollView>
-      </KeyboardAvoidingView>
+        </Animated.ScrollView>
+        <Animated.View
+          pointerEvents="none"
+          style={[
+            styles.topFade,
+            {
+              top: headerHeight,
+              height: fadeHeight,
+              opacity: fadeOpacity,
+            },
+          ]}
+        >
+          <LinearGradient
+            colors={fadeColors}
+            locations={fadeLocations}
+            start={{ x: 0, y: 0 }}
+            end={{ x: 0, y: 1 }}
+            style={StyleSheet.absoluteFillObject}
+          />
+        </Animated.View>
+        <View
+          pointerEvents="none"
+          style={[
+            styles.bottomFade,
+            {
+              bottom: 0,
+              height: fadeHeight,
+            },
+          ]}
+        >
+          <LinearGradient
+            colors={bottomFadeColors}
+            locations={fadeLocations}
+            start={{ x: 0, y: 0 }}
+            end={{ x: 0, y: 1 }}
+            style={StyleSheet.absoluteFillObject}
+          />
+        </View>
+      </View>
       ) : (
         <ScrollView
           style={styles.scroll}
@@ -1218,12 +1494,18 @@ function AppContent() {
             style={[
               styles.card,
               {
-                backgroundColor: colors.card,
+                backgroundColor: glassCard,
                 shadowColor: colors.shadow,
-                borderColor: colors.border,
+                borderColor: glassBorder,
               },
             ]}
           >
+            <BlurView
+              intensity={glassBlurIntensity}
+              tint={colorScheme === 'dark' ? 'dark' : 'light'}
+              style={[StyleSheet.absoluteFillObject, { borderRadius: 20 }]}
+              pointerEvents="none"
+            />
             <View style={styles.settingsRow}>
               <View style={styles.settingsText}>
                 <Text style={[styles.settingsLabel, { color: colors.textPrimary }]}>Dark mode</Text>
@@ -1243,12 +1525,18 @@ function AppContent() {
             style={[
               styles.card,
               {
-                backgroundColor: colors.card,
+                backgroundColor: glassCard,
                 shadowColor: colors.shadow,
-                borderColor: colors.border,
+                borderColor: glassBorder,
               },
             ]}
           >
+            <BlurView
+              intensity={glassBlurIntensity}
+              tint={colorScheme === 'dark' ? 'dark' : 'light'}
+              style={[StyleSheet.absoluteFillObject, { borderRadius: 20 }]}
+              pointerEvents="none"
+            />
             <View style={styles.settingsRow}>
               <View style={styles.settingsText}>
                 <Text style={[styles.settingsLabel, { color: colors.textPrimary }]}>
@@ -1302,194 +1590,442 @@ function AppContent() {
         style={[
           styles.tabBar,
           {
-            backgroundColor: colors.card,
-            borderColor: colors.border,
             height: TAB_BAR_HEIGHT + insets.bottom,
             paddingBottom: insets.bottom,
           },
         ]}
       >
-        <Pressable
-          onPress={() => setActiveTab('home')}
-          style={styles.tabButton}
-          accessibilityRole="button"
-          accessibilityState={{ selected: activeTab === 'home' }}
+        <View
+          style={[
+            styles.tabPill,
+            {
+              borderColor: colors.accent,
+              shadowColor: colors.shadow,
+              backgroundColor: glassCard,
+            },
+          ]}
         >
-          <MaterialIcons
-            name="home"
-            size={25}
-            color={activeTab === 'home' ? colors.accent : colors.textSecondary}
-            style={styles.tabIcon}
+          <BlurView
+            intensity={28}
+            tint={colorScheme === 'dark' ? 'dark' : 'light'}
+            style={StyleSheet.absoluteFillObject}
           />
-          <Text
-            style={[
-              styles.tabLabel,
-              { color: activeTab === 'home' ? colors.accent : colors.textSecondary },
-            ]}
-          >
-            Home
-          </Text>
-        </Pressable>
-        <Pressable
-          onPress={() => setActiveTab('settings')}
-          style={styles.tabButton}
-          accessibilityRole="button"
-          accessibilityState={{ selected: activeTab === 'settings' }}
-        >
-          <MaterialIcons
-            name="settings"
-            size={25}
-            color={activeTab === 'settings' ? colors.accent : colors.textSecondary}
-            style={styles.tabIcon}
+          <LinearGradient
+            colors={[glassHighlightStrong, glassHighlightSoft, glassHighlightFade]}
+            locations={[0, 0.5, 1]}
+            start={{ x: 0, y: 0 }}
+            end={{ x: 0, y: 1 }}
+            style={StyleSheet.absoluteFillObject}
+            pointerEvents="none"
           />
-          <Text
-            style={[
-              styles.tabLabel,
-              { color: activeTab === 'settings' ? colors.accent : colors.textSecondary },
-            ]}
-          >
-            Settings
-          </Text>
-        </Pressable>
-      </View>
-
-      {isNamePromptOpen ? (
-        <View style={[styles.sheetBackdrop, { backgroundColor: colors.sheetBackdrop }]}>
-          <Animated.View
-            style={[
-              styles.namePromptWrapper,
-              { transform: [{ translateY: Animated.multiply(keyboardOffset, -1) }] },
-            ]}
-          >
-            <View
-              style={[
-                styles.namePrompt,
-                {
-                  backgroundColor: colors.sheet,
-                  borderColor: colors.border,
-                  shadowColor: colors.shadow,
-                },
-              ]}
+          <View style={styles.tabPillContent}>
+            <Pressable
+              onPress={() => setActiveTab('home')}
+              style={styles.tabButton}
+              accessibilityRole="button"
+              accessibilityState={{ selected: activeTab === 'home' }}
             >
-              <Text style={[styles.namePromptTitle, { color: colors.textPrimary }]}>
-                {namePromptTitle}
-              </Text>
-              <TextInput
-                value={nameDraft}
-                onChangeText={setNameDraft}
-                placeholder={namePromptPlaceholder}
-                placeholderTextColor={colors.placeholder}
-                style={[
-                  styles.namePromptInput,
-                  {
-                    backgroundColor: colors.inputBackground,
-                    color: colors.inputText,
-                    borderColor: colors.border,
-                  },
-                ]}
-                autoCapitalize="words"
-                autoFocus
-                maxLength={40}
-                returnKeyType="done"
-                onSubmitEditing={confirmNamePrompt}
+              <MaterialIcons
+                name="restore"
+                size={25}
+                color={activeTab === 'home' ? colors.accent : colors.textSecondary}
+                style={styles.tabIcon}
               />
-              <View style={styles.namePromptActions}>
-                <Pressable onPress={closeNamePrompt} hitSlop={8}>
-                  <Text style={[styles.namePromptCancel, { color: colors.textSecondary }]}>
-                    Cancel
-                  </Text>
-                </Pressable>
-                <Pressable
-                  onPress={confirmNamePrompt}
-                  disabled={!canConfirmName}
-                  style={[
-                    styles.namePromptButton,
-                    { backgroundColor: canConfirmName ? colors.accent : colors.placeholder },
-                  ]}
-                >
-                  <Text style={styles.namePromptButtonLabel}>
-                    {isEditingName ? 'Save' : 'Add'}
-                  </Text>
-                </Pressable>
-              </View>
-            </View>
-          </Animated.View>
-        </View>
-      ) : null}
-
-      {activeTab === 'home' && menuScheduleId ? (
-        <View style={[styles.sheetBackdrop, { backgroundColor: colors.sheetBackdrop }]}>
-          <Pressable style={StyleSheet.absoluteFillObject} onPress={closeMenu} />
-          <View
-            style={[
-              styles.menuSheet,
-              {
-                backgroundColor: colors.sheet,
-                borderColor: colors.border,
-                shadowColor: colors.shadow,
-              },
-            ]}
-          >
-            <Pressable
-              style={styles.menuItem}
-              onPress={() => {
-                const schedule = schedules.find((item) => item.id === menuScheduleId);
-                closeMenu();
-                if (schedule) {
-                  editScheduleName(schedule);
-                }
-              }}
-            >
-              <View style={styles.menuItemContent}>
-                <MaterialIcons name="edit" size={18} color={colors.textPrimary} />
-                <Text style={[styles.menuItemText, { color: colors.textPrimary }]}>Edit</Text>
-              </View>
+              <Text
+                style={[
+                  styles.tabLabel,
+                  { color: activeTab === 'home' ? colors.accent : colors.textSecondary },
+                ]}
+              >
+                Reminders
+              </Text>
             </Pressable>
             <Pressable
-              style={styles.menuItem}
-              onPress={() => {
-                const schedule = schedules.find((item) => item.id === menuScheduleId);
-                closeMenu();
-                if (schedule) {
-                  duplicateSchedule(schedule);
-                }
-              }}
+              onPress={() => setActiveTab('settings')}
+              style={styles.tabButton}
+              accessibilityRole="button"
+              accessibilityState={{ selected: activeTab === 'settings' }}
             >
-              <View style={styles.menuItemContent}>
-                <MaterialIcons name="content-copy" size={18} color={colors.textPrimary} />
-                <Text style={[styles.menuItemText, { color: colors.textPrimary }]}>Duplicate</Text>
-              </View>
-            </Pressable>
-            <Pressable
-              style={styles.menuItem}
-              onPress={() => {
-                const schedule = schedules.find((item) => item.id === menuScheduleId);
-                closeMenu();
-                if (schedule) {
-                  void removeSchedule(schedule.id);
-                }
-              }}
-            >
-              <View style={styles.menuItemContent}>
-                <MaterialIcons name="delete-outline" size={18} color={colors.remove} />
-                <Text style={[styles.menuItemText, { color: colors.remove }]}>Remove</Text>
-              </View>
-            </Pressable>
-            <Pressable style={styles.menuCancel} onPress={closeMenu}>
-              <View style={styles.menuCancelContent}>
-                <MaterialIcons name="close" size={18} color={colors.textSecondary} />
-                <Text style={[styles.menuCancelText, { color: colors.textSecondary }]}>
-                  Cancel
-                </Text>
-              </View>
+              <MaterialCommunityIcons
+                name="cog-outline"
+                size={25}
+                color={activeTab === 'settings' ? colors.accent : colors.textSecondary}
+                style={styles.tabIcon}
+              />
+              <Text
+                style={[
+                  styles.tabLabel,
+                  { color: activeTab === 'settings' ? colors.accent : colors.textSecondary },
+                ]}
+              >
+                Settings
+              </Text>
             </Pressable>
           </View>
+        </View>
+      </View>
+
+      {isDetailSheetVisible && detailSchedule ? (
+        <View style={styles.detailBackdrop}>
+          <Reanimated.View
+            pointerEvents="none"
+            style={[
+              styles.detailBackdropFill,
+              { backgroundColor: colors.sheetBackdrop },
+              detailBackdropAnimatedStyle,
+            ]}
+          />
+          <Pressable
+            style={StyleSheet.absoluteFillObject}
+            onPress={() => closeDetailSheet('discard')}
+          />
+          <GestureDetector gesture={detailPanGesture}>
+            <Reanimated.View
+              style={[
+                styles.detailSheet,
+                {
+                  backgroundColor: glassSheet,
+                  height: detailSheetHeight,
+                  borderColor: glassBorder,
+                  paddingBottom: 24 + insets.bottom,
+                },
+                detailSheetAnimatedStyle,
+              ]}
+            >
+              <BlurView
+                intensity={glassBlurIntensity}
+                tint={colorScheme === 'dark' ? 'dark' : 'light'}
+                style={[StyleSheet.absoluteFillObject, { borderRadius: 26 }]}
+                pointerEvents="none"
+              />
+              <LinearGradient
+                colors={[glassHighlightStrong, glassHighlightSoft, glassHighlightFade]}
+                locations={[0, 0.5, 1]}
+                start={{ x: 0, y: 0 }}
+                end={{ x: 0, y: 1 }}
+                style={[StyleSheet.absoluteFillObject, { borderRadius: 26 }]}
+                pointerEvents="none"
+              />
+              <View style={styles.detailHeader}>
+                <Pressable
+                  onPress={() => closeDetailSheet('discard')}
+                  hitSlop={8}
+                  accessibilityRole="button"
+                  accessibilityLabel="Cancel reminder changes"
+                  style={[
+                    styles.detailHeaderButton,
+                    { backgroundColor: colors.inputBackground, borderColor: colors.border },
+                  ]}
+                >
+                  <MaterialIcons name="close" size={20} color={colors.textPrimary} />
+                </Pressable>
+                <Text style={[styles.detailTitle, { color: colors.textPrimary }]}>
+                  {detailMode === 'add' ? 'Add Reminder' : 'Edit Reminder'}
+                </Text>
+                <Pressable
+                  onPress={saveScheduleDetail}
+                  hitSlop={8}
+                  accessibilityRole="button"
+                  accessibilityLabel="Save reminder"
+                  style={[
+                    styles.detailHeaderButton,
+                    { backgroundColor: colors.accent, borderColor: colors.accent },
+                  ]}
+                >
+                  <MaterialIcons name="check" size={20} color="#FFFFFF" />
+                </Pressable>
+              </View>
+              <Reanimated.ScrollView
+                contentContainerStyle={styles.detailContent}
+                showsVerticalScrollIndicator={false}
+                keyboardShouldPersistTaps="handled"
+                keyboardDismissMode="interactive"
+                automaticallyAdjustKeyboardInsets
+                contentInsetAdjustmentBehavior="always"
+                style={styles.detailScroll}
+                scrollEventThrottle={16}
+                onScroll={detailScrollHandler}
+              >
+              <View style={styles.detailPickerGroup}>
+                <Text style={[styles.detailSectionTitle, { color: colors.textSecondary }]}>
+                  Time
+                </Text>
+                <Pressable
+                  style={[
+                    styles.timeRow,
+                    {
+                      backgroundColor: glassCard,
+                      borderColor: glassBorder,
+                      borderWidth: 1,
+                    },
+                  ]}
+                  onPress={() =>
+                    setActivePicker({ scheduleId: detailSchedule.id, kind: 'start' })
+                  }
+                  accessibilityRole="button"
+                  accessibilityLabel="Choose start time"
+                >
+                  <Text style={[styles.timeLabel, { color: colors.textPrimary }]}>
+                    {detailScheduleType === 'withinDay' ? 'Start' : 'Time'}
+                  </Text>
+                  <Text style={[styles.timeValue, { color: colors.textPrimary }]}>
+                    {formatTime(detailSchedule.startMinutesFromMidnight)}
+                  </Text>
+                </Pressable>
+                {detailScheduleType === 'withinDay' ? (
+                  <Pressable
+                    style={[
+                      styles.timeRow,
+                      {
+                        backgroundColor: glassCard,
+                        borderColor: glassBorder,
+                        borderWidth: 1,
+                      },
+                    ]}
+                    onPress={() =>
+                      setActivePicker({ scheduleId: detailSchedule.id, kind: 'end' })
+                    }
+                    accessibilityRole="button"
+                    accessibilityLabel="Choose end time"
+                  >
+                    <Text style={[styles.timeLabel, { color: colors.textPrimary }]}>End</Text>
+                    <Text style={[styles.timeValue, { color: colors.textPrimary }]}>
+                      {formatTime(detailSchedule.endMinutesFromMidnight)}
+                    </Text>
+                  </Pressable>
+                ) : null}
+              </View>
+
+              <View
+                style={[
+                  styles.detailSection,
+                  { backgroundColor: glassCard, borderColor: glassBorder },
+                ]}
+              >
+                <View style={styles.detailRow}>
+                  <Text style={[styles.detailRowLabel, { color: colors.textPrimary }]}>Label</Text>
+                  <TextInput
+                    value={detailSchedule.name ?? ''}
+                    onChangeText={(value) => updateSchedule(detailSchedule.id, { name: value })}
+                    onFocus={() => updateSchedule(detailSchedule.id, { name: '' })}
+                    placeholder="Reminder"
+                    placeholderTextColor={colors.placeholder}
+                    style={[styles.detailRowInput, { color: colors.textPrimary }]}
+                  />
+                </View>
+                <View style={[styles.detailDivider, { backgroundColor: colors.border }]} />
+                <View style={styles.detailRow}>
+                  <Text style={[styles.detailRowLabel, { color: colors.textPrimary }]}>
+                    Message
+                  </Text>
+                  <TextInput
+                    value={detailSchedule.message ?? ''}
+                    onChangeText={(value) => updateSchedule(detailSchedule.id, { message: value })}
+                    onFocus={() => updateSchedule(detailSchedule.id, { message: '' })}
+                    placeholder="Don't forget!"
+                    placeholderTextColor={colors.placeholder}
+                    style={[styles.detailRowInput, { color: colors.textPrimary }]}
+                  />
+                </View>
+              </View>
+
+              <View
+                style={[
+                  styles.detailSection,
+                  { backgroundColor: glassCard, borderColor: glassBorder },
+                ]}
+              >
+                <Text style={[styles.detailSectionTitle, { color: colors.textSecondary }]}>
+                  Schedule
+                </Text>
+                <View style={styles.typeOptions}>
+                  {SCHEDULE_TYPE_OPTIONS.map((option) => {
+                    const isSelected = detailScheduleType === option.value;
+                    return (
+                      <Pressable
+                        key={option.value}
+                        style={[
+                          styles.typeOption,
+                          {
+                            borderColor: isSelected ? colors.accent : colors.border,
+                            backgroundColor: isSelected
+                              ? withAlpha(colors.accent, colorScheme === 'dark' ? 0.2 : 0.12)
+                              : 'transparent',
+                          },
+                        ]}
+                        onPress={() => updateScheduleType(detailSchedule, option.value)}
+                      >
+                        <Text
+                          style={[
+                            styles.typeOptionText,
+                            { color: isSelected ? colors.accent : colors.textSecondary },
+                          ]}
+                        >
+                          {option.label}
+                        </Text>
+                      </Pressable>
+                    );
+                  })}
+                </View>
+                {detailTypeOption ? (
+                  <Text style={[styles.typeHelper, { color: colors.textMuted }]}>
+                    {detailTypeOption.helper}
+                  </Text>
+                ) : null}
+
+                {detailScheduleType === 'withinDay' ? (
+                  <View
+                    style={[
+                      styles.intervalRow,
+                      { backgroundColor: colors.inputBackground, borderColor: colors.border },
+                    ]}
+                  >
+                    <Text style={[styles.detailRowLabel, { color: colors.textPrimary }]}>Every</Text>
+                    <View style={styles.intervalInputGroup}>
+                      <Pressable
+                        style={[styles.stepperButton, { backgroundColor: colors.accent }]}
+                        onPress={() => stepInterval(detailSchedule.id, -1)}
+                        accessibilityRole="button"
+                        accessibilityLabel="Decrease interval"
+                      >
+                        <Text style={styles.stepperLabel}>-</Text>
+                      </Pressable>
+                      <TextInput
+                        value={detailIntervalValue}
+                        onChangeText={(value) => updateIntervalDraft(detailSchedule.id, value)}
+                        onBlur={() => commitIntervalDraft(detailSchedule.id)}
+                        keyboardType="number-pad"
+                        style={[
+                          styles.intervalInput,
+                          {
+                            backgroundColor: colors.inputBackground,
+                            color: colors.textPrimary,
+                            borderColor: colors.border,
+                          },
+                        ]}
+                      />
+                      <Text style={[styles.intervalUnit, { color: colors.textSecondary }]}>min</Text>
+                      <Pressable
+                        style={[styles.stepperButton, { backgroundColor: colors.accent }]}
+                        onPress={() => stepInterval(detailSchedule.id, 1)}
+                        accessibilityRole="button"
+                        accessibilityLabel="Increase interval"
+                      >
+                        <Text style={styles.stepperLabel}>+</Text>
+                      </Pressable>
+                    </View>
+                  </View>
+                ) : null}
+
+                {detailScheduleType === 'weekly' || detailScheduleType === 'withinDay' ? (
+                  <View style={styles.detailSubsection}>
+                    <Text style={[styles.detailSectionTitle, { color: colors.textSecondary }]}>
+                      Days
+                    </Text>
+                    <View style={styles.dayRow}>
+                      {DAY_LABELS.map((label, dayIndex) => {
+                        const isSelected = detailScheduleDays[dayIndex];
+                        return (
+                          <Pressable
+                            key={label}
+                            style={[
+                              styles.dayButton,
+                              {
+                                backgroundColor: isSelected ? colors.accent : colors.inputBackground,
+                                borderColor: isSelected ? colors.accent : colors.border,
+                              },
+                            ]}
+                            onPress={() => toggleScheduleDay(detailSchedule.id, dayIndex)}
+                          >
+                            <Text
+                              style={[
+                                styles.dayLabel,
+                                { color: isSelected ? '#FFFFFF' : colors.textSecondary },
+                              ]}
+                            >
+                              {label}
+                            </Text>
+                          </Pressable>
+                        );
+                      })}
+                    </View>
+                  </View>
+                ) : null}
+
+                {detailScheduleType === 'monthly' ? (
+                  <View style={styles.detailSubsection}>
+                    <Text style={[styles.detailSectionTitle, { color: colors.textSecondary }]}>
+                      Day of month
+                    </Text>
+                    <View
+                      style={[
+                        styles.intervalRow,
+                        { backgroundColor: colors.inputBackground, borderColor: colors.border },
+                      ]}
+                    >
+                      <Pressable
+                        style={[styles.stepperButton, { backgroundColor: colors.accent }]}
+                        onPress={() => stepDayOfMonth(detailSchedule.id, -1)}
+                        accessibilityRole="button"
+                        accessibilityLabel="Decrease day"
+                      >
+                        <Text style={styles.stepperLabel}>-</Text>
+                      </Pressable>
+                      <TextInput
+                        value={detailDayOfMonthValue}
+                        onChangeText={(value) => updateDayOfMonthDraft(detailSchedule.id, value)}
+                        onBlur={() => commitDayOfMonthDraft(detailSchedule.id)}
+                        keyboardType="number-pad"
+                        style={[
+                          styles.intervalInput,
+                          {
+                            backgroundColor: colors.inputBackground,
+                            color: colors.textPrimary,
+                            borderColor: colors.border,
+                          },
+                        ]}
+                      />
+                      <Text style={[styles.intervalUnit, { color: colors.textSecondary }]}>day</Text>
+                      <Pressable
+                        style={[styles.stepperButton, { backgroundColor: colors.accent }]}
+                        onPress={() => stepDayOfMonth(detailSchedule.id, 1)}
+                        accessibilityRole="button"
+                        accessibilityLabel="Increase day"
+                      >
+                        <Text style={styles.stepperLabel}>+</Text>
+                      </Pressable>
+                    </View>
+                  </View>
+                ) : null}
+              </View>
+
+              <Pressable
+                style={({ pressed }) => [
+                  styles.detailTestButton,
+                  { backgroundColor: colors.accent },
+                  pressed && styles.detailTestButtonPressed,
+                ]}
+                onPress={() => void sendTestNotification(detailSchedule)}
+                accessibilityRole="button"
+                accessibilityLabel="Test notification"
+              >
+                <Text style={styles.detailTestButtonLabel}>Test notification</Text>
+              </Pressable>
+              </Reanimated.ScrollView>
+            </Reanimated.View>
+          </GestureDetector>
         </View>
       ) : null}
 
       {activePicker && (activeSchedule || activePicker.scheduleId === 'quiet') ? (
         <View style={[styles.sheetBackdrop, { backgroundColor: colors.sheetBackdrop }]}>
-          <View style={[styles.sheet, { backgroundColor: colors.sheet }]}>
+          <View style={[styles.sheet, { backgroundColor: glassSheet }]}>
+            <BlurView
+              intensity={glassBlurIntensity}
+              tint={colorScheme === 'dark' ? 'dark' : 'light'}
+              style={[StyleSheet.absoluteFillObject, { borderRadius: 20 }]}
+              pointerEvents="none"
+            />
             <View style={styles.sheetHeader}>
               <Text style={[styles.sheetTitle, { color: colors.textPrimary }]}>
                 {activePicker.scheduleId === 'quiet'
@@ -1497,7 +2033,9 @@ function AppContent() {
                     ? 'Quiet hours start'
                     : 'Quiet hours end'
                   : activePicker.kind === 'start'
-                    ? 'Start time'
+                    ? getScheduleType(activeSchedule?.type) === 'withinDay'
+                      ? 'Start time'
+                      : 'Time'
                     : 'End time'}
               </Text>
               <Pressable onPress={() => setActivePicker(null)}>
@@ -1521,9 +2059,15 @@ function AppContent() {
           <View
             style={[
               styles.onboardingCard,
-              { backgroundColor: colors.card, borderColor: colors.border, shadowColor: colors.shadow },
+              { backgroundColor: glassCard, borderColor: glassBorder, shadowColor: colors.shadow },
             ]}
           >
+            <BlurView
+              intensity={glassBlurIntensity}
+              tint={colorScheme === 'dark' ? 'dark' : 'light'}
+              style={[StyleSheet.absoluteFillObject, { borderRadius: 18 }]}
+              pointerEvents="none"
+            />
             <Text style={[styles.onboardingTitle, { color: colors.textPrimary }]}>
               Welcome to Never4Get
             </Text>
@@ -1549,11 +2093,13 @@ function AppContent() {
 
 export default function App() {
   return (
-    <SafeAreaProvider>
-      <ColorSchemeProvider>
-        <AppContent />
-      </ColorSchemeProvider>
-    </SafeAreaProvider>
+    <GestureHandlerRootView style={{ flex: 1 }}>
+      <SafeAreaProvider>
+        <ColorSchemeProvider>
+          <AppContent />
+        </ColorSchemeProvider>
+      </SafeAreaProvider>
+    </GestureHandlerRootView>
   );
 }
 
@@ -1587,7 +2133,6 @@ const styles = StyleSheet.create({
   },
   container: {
     padding: 18,
-    paddingBottom: 220,
     gap: 12,
     minHeight: '100%',
   },
@@ -1608,15 +2153,15 @@ const styles = StyleSheet.create({
     gap: 6,
   },
   settingsLabel: {
-    fontSize: 16,
+    fontSize: FONT_SIZE_MD,
     fontWeight: '600',
     fontFamily: FONT_BOLD,
   },
   settingsHelper: {
-    fontSize: 13,
+    fontSize: FONT_SIZE_SM,
   },
   settingsSectionTitle: {
-    fontSize: 15,
+    fontSize: FONT_SIZE_MD,
     fontWeight: '700',
     fontFamily: FONT_BOLD,
   },
@@ -1624,33 +2169,114 @@ const styles = StyleSheet.create({
     flex: 1,
   },
   title: {
-    fontSize: 34,
+    fontSize: FONT_SIZE_TITLE,
     fontWeight: '800',
     fontFamily: FONT_BOLD,
     letterSpacing: -0.5,
   },
-  titleRow: {
+  headerBar: {
+    paddingHorizontal: 18,
+    paddingTop: 12,
+    paddingBottom: 8,
+    gap: 10,
+    borderBottomLeftRadius: 18,
+    borderBottomRightRadius: 18,
+    borderBottomWidth: 0.75,
+    overflow: 'hidden',
+  },
+  headerActions: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
+    width: '100%',
+  },
+  headerActionButton: {
+    paddingHorizontal: 14,
+    paddingVertical: 8,
+    borderRadius: 16,
+    borderWidth: 0.75,
+  },
+  headerActionText: {
+    fontSize: FONT_SIZE_MD,
+    fontWeight: '600',
+    fontFamily: FONT_MEDIUM,
+  },
+  alarmList: {
+    borderRadius: 22,
+    borderWidth: 1,
+    overflow: 'hidden',
+    shadowOpacity: 0.12,
+    shadowRadius: 18,
+    shadowOffset: { width: 0, height: 8 },
+    elevation: 8,
+  },
+  alarmRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 14,
+    paddingHorizontal: 16,
+    paddingVertical: 14,
+  },
+  alarmRowMain: {
+    flex: 1,
+    gap: 4,
+  },
+  alarmTime: {
+    fontSize: FONT_SIZE_DISPLAY,
+    fontWeight: '300',
+    fontFamily: FONT_REGULAR,
+    letterSpacing: -0.6,
+  },
+  alarmLabel: {
+    fontSize: FONT_SIZE_MD,
+    fontWeight: '600',
+    fontFamily: FONT_MEDIUM,
+  },
+  alarmSubtext: {
+    fontSize: FONT_SIZE_SM,
+    fontFamily: FONT_REGULAR,
+  },
+  alarmDelete: {
+    paddingRight: 4,
+  },
+  alarmDeleteBadge: {
+    width: 26,
+    height: 26,
+    borderRadius: 13,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  alarmDeleteText: {
+    color: '#FFFFFF',
+    fontSize: FONT_SIZE_MD,
+    fontWeight: '700',
+    fontFamily: FONT_BOLD,
+    marginTop: -1,
+  },
+  topFade: {
+    position: 'absolute',
+    left: 0,
+    right: 0,
+  },
+  bottomFade: {
+    position: 'absolute',
+    left: 0,
+    right: 0,
   },
   addButton: {
     width: 40,
     height: 40,
     borderRadius: 20,
-    borderWidth: 0,
+    borderWidth: 0.75,
     alignItems: 'center',
     justifyContent: 'center',
-    shadowOpacity: 0.15,
-    shadowRadius: 8,
-    shadowOffset: { width: 0, height: 2 },
-    elevation: 4,
   },
   card: {
     borderRadius: 20,
     padding: 20,
     gap: 16,
     borderWidth: 1,
+    overflow: 'hidden',
     shadowOpacity: 0.08,
     shadowRadius: 20,
     shadowOffset: { width: 0, height: 4 },
@@ -1675,7 +2301,7 @@ const styles = StyleSheet.create({
     paddingRight: 20,
   },
   cardTitleInput: {
-    fontSize: 17,
+    fontSize: FONT_SIZE_LG,
     fontWeight: '600',
     fontFamily: FONT_BOLD,
     flex: 1,
@@ -1704,13 +2330,13 @@ const styles = StyleSheet.create({
     right: 0,
   },
   menuLabel: {
-    fontSize: 20,
+    fontSize: FONT_SIZE_XL,
     fontWeight: '600',
     fontFamily: FONT_BOLD,
     letterSpacing: 1,
   },
   cardSummary: {
-    fontSize: 12,
+    fontSize: FONT_SIZE_XS,
     fontFamily: FONT_REGULAR,
     marginBottom: 6,
   },
@@ -1726,7 +2352,7 @@ const styles = StyleSheet.create({
     alignItems: 'center',
   },
   testButtonLabel: {
-    fontSize: 12,
+    fontSize: FONT_SIZE_XS,
     fontWeight: '700',
     fontFamily: FONT_BOLD,
   },
@@ -1743,7 +2369,7 @@ const styles = StyleSheet.create({
   },
   toggleButtonLabel: {
     color: '#FFFFFF',
-    fontSize: 12,
+    fontSize: FONT_SIZE_XS,
     fontWeight: '700',
     fontFamily: FONT_BOLD,
   },
@@ -1772,12 +2398,12 @@ const styles = StyleSheet.create({
     borderRadius: 12,
     paddingVertical: 8,
     paddingHorizontal: 10,
-    fontSize: 16,
+    fontSize: FONT_SIZE_MD,
     fontWeight: '600',
     fontFamily: FONT_MEDIUM,
   },
   intervalUnit: {
-    fontSize: 13,
+    fontSize: FONT_SIZE_SM,
     fontWeight: '600',
     fontFamily: FONT_MEDIUM,
   },
@@ -1794,13 +2420,13 @@ const styles = StyleSheet.create({
     elevation: 3,
   },
   stepperLabel: {
-    fontSize: 20,
+    fontSize: FONT_SIZE_XL,
     color: '#FFFFFF',
     fontWeight: '700',
     fontFamily: FONT_BOLD,
   },
   intervalValue: {
-    fontSize: 16,
+    fontSize: FONT_SIZE_MD,
     fontWeight: '600',
     fontFamily: FONT_MEDIUM,
   },
@@ -1818,12 +2444,12 @@ const styles = StyleSheet.create({
     marginTop: 8,
   },
   timeLabel: {
-    fontSize: 15,
+    fontSize: FONT_SIZE_MD,
     fontWeight: '600',
     fontFamily: FONT_MEDIUM,
   },
   timeValue: {
-    fontSize: 15,
+    fontSize: FONT_SIZE_MD,
     fontWeight: '600',
     fontFamily: FONT_MEDIUM,
   },
@@ -1846,19 +2472,45 @@ const styles = StyleSheet.create({
     elevation: 2,
   },
   dayLabel: {
-    fontSize: 11,
+    fontSize: FONT_SIZE_XS,
     fontWeight: '600',
     fontFamily: FONT_BOLD,
   },
   helperText: {
-    fontSize: 12,
+    fontSize: FONT_SIZE_XS,
     fontFamily: FONT_REGULAR,
+  },
+  emptyState: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 12,
+  },
+  emptyStateTitle: {
+    fontSize: FONT_SIZE_XL,
+    fontWeight: '700',
+    fontFamily: FONT_BOLD,
+  },
+  emptyStateButton: {
+    borderRadius: 14,
+    paddingVertical: 12,
+    paddingHorizontal: 18,
+    alignItems: 'center',
+  },
+  emptyStateButtonLabel: {
+    color: '#FFFFFF',
+    fontSize: FONT_SIZE_MD,
+    fontWeight: '700',
+    fontFamily: FONT_BOLD,
   },
   messageBlock: {
     gap: 6,
   },
+  monthBlock: {
+    gap: 6,
+  },
   messageLabel: {
-    fontSize: 12,
+    fontSize: FONT_SIZE_XS,
     fontWeight: '600',
     fontFamily: FONT_MEDIUM,
   },
@@ -1866,7 +2518,7 @@ const styles = StyleSheet.create({
     borderRadius: 14,
     paddingHorizontal: 16,
     paddingVertical: 12,
-    fontSize: 15,
+    fontSize: FONT_SIZE_MD,
     fontFamily: FONT_REGULAR,
     borderWidth: 0,
   },
@@ -1881,7 +2533,7 @@ const styles = StyleSheet.create({
   },
   cardButtonLabel: {
     color: '#FFFFFF',
-    fontSize: 15,
+    fontSize: FONT_SIZE_MD,
     fontWeight: '700',
     fontFamily: FONT_BOLD,
   },
@@ -1892,7 +2544,7 @@ const styles = StyleSheet.create({
     alignItems: 'center',
   },
   secondaryButtonLabel: {
-    fontSize: 15,
+    fontSize: FONT_SIZE_MD,
     fontWeight: '700',
     fontFamily: FONT_BOLD,
   },
@@ -1901,14 +2553,43 @@ const styles = StyleSheet.create({
     padding: 24,
     borderRadius: 24,
     borderWidth: 0,
+    overflow: 'hidden',
     shadowOpacity: 0.15,
     shadowRadius: 20,
     shadowOffset: { width: 0, height: 8 },
     gap: 16,
     elevation: 10,
   },
+  typeSelector: {
+    gap: 8,
+  },
+  typeLabel: {
+    fontSize: FONT_SIZE_XS,
+    fontWeight: '600',
+    fontFamily: FONT_MEDIUM,
+  },
+  typeOptions: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 8,
+  },
+  typeOption: {
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderRadius: 12,
+    borderWidth: 1,
+  },
+  typeOptionText: {
+    fontSize: FONT_SIZE_XS,
+    fontWeight: '700',
+    fontFamily: FONT_BOLD,
+  },
+  typeHelper: {
+    fontSize: FONT_SIZE_XS,
+    fontFamily: FONT_REGULAR,
+  },
   namePromptTitle: {
-    fontSize: 17,
+    fontSize: FONT_SIZE_LG,
     fontWeight: '700',
     fontFamily: FONT_BOLD,
   },
@@ -1916,7 +2597,7 @@ const styles = StyleSheet.create({
     borderRadius: 14,
     paddingHorizontal: 16,
     paddingVertical: 12,
-    fontSize: 16,
+    fontSize: FONT_SIZE_MD,
     fontFamily: FONT_REGULAR,
     borderWidth: 0,
   },
@@ -1927,7 +2608,7 @@ const styles = StyleSheet.create({
     marginTop: 4,
   },
   namePromptCancel: {
-    fontSize: 15,
+    fontSize: FONT_SIZE_MD,
     fontWeight: '600',
     fontFamily: FONT_MEDIUM,
   },
@@ -1942,7 +2623,7 @@ const styles = StyleSheet.create({
   },
   namePromptButtonLabel: {
     color: '#FFFFFF',
-    fontSize: 15,
+    fontSize: FONT_SIZE_MD,
     fontWeight: '700',
     fontFamily: FONT_BOLD,
   },
@@ -1951,6 +2632,7 @@ const styles = StyleSheet.create({
     marginBottom: 18,
     borderRadius: 24,
     borderWidth: 0,
+    overflow: 'hidden',
     shadowOpacity: 0.15,
     shadowRadius: 20,
     shadowOffset: { width: 0, height: 8 },
@@ -1967,7 +2649,7 @@ const styles = StyleSheet.create({
     gap: 10,
   },
   menuItemText: {
-    fontSize: 16,
+    fontSize: FONT_SIZE_MD,
     fontWeight: '600',
     fontFamily: FONT_BOLD,
   },
@@ -1982,7 +2664,7 @@ const styles = StyleSheet.create({
     gap: 8,
   },
   menuCancelText: {
-    fontSize: 15,
+    fontSize: FONT_SIZE_MD,
     fontWeight: '600',
     fontFamily: FONT_BOLD,
     textAlign: 'center',
@@ -1992,6 +2674,7 @@ const styles = StyleSheet.create({
     marginBottom: 24,
     borderRadius: 18,
     borderWidth: 1,
+    overflow: 'hidden',
     padding: 16,
     gap: 12,
     shadowOpacity: 0.08,
@@ -2004,7 +2687,7 @@ const styles = StyleSheet.create({
     justifyContent: 'space-between',
   },
   mapPickerTitle: {
-    fontSize: 17,
+    fontSize: FONT_SIZE_LG,
     fontWeight: '700',
     fontFamily: FONT_BOLD,
   },
@@ -2034,6 +2717,103 @@ const styles = StyleSheet.create({
     ...StyleSheet.absoluteFillObject,
     justifyContent: 'flex-end',
   },
+  detailBackdrop: {
+    ...StyleSheet.absoluteFillObject,
+    justifyContent: 'flex-end',
+  },
+  detailBackdropFill: {
+    ...StyleSheet.absoluteFillObject,
+  },
+  detailSheet: {
+    paddingTop: 12,
+    paddingHorizontal: 16,
+    borderTopLeftRadius: 26,
+    borderTopRightRadius: 26,
+    borderWidth: 1,
+    overflow: 'hidden',
+  },
+  detailHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingBottom: 8,
+  },
+  detailHeaderButton: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    borderWidth: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  detailTitle: {
+    fontSize: FONT_SIZE_MD,
+    fontWeight: '700',
+    fontFamily: FONT_BOLD,
+  },
+  detailContent: {
+    gap: 16,
+    paddingBottom: 12,
+  },
+  detailScroll: {
+    flex: 1,
+  },
+  detailPickerGroup: {
+    gap: 12,
+  },
+  detailSection: {
+    borderRadius: 18,
+    borderWidth: 1,
+    padding: 14,
+    gap: 12,
+    overflow: 'hidden',
+  },
+  detailSectionTitle: {
+    fontSize: FONT_SIZE_SM,
+    fontWeight: '600',
+    fontFamily: FONT_MEDIUM,
+  },
+  detailSubsection: {
+    gap: 8,
+  },
+  detailRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 12,
+  },
+  detailRowLabel: {
+    fontSize: FONT_SIZE_MD,
+    fontWeight: '600',
+    fontFamily: FONT_MEDIUM,
+  },
+  detailRowInput: {
+    flex: 1,
+    textAlign: 'right',
+    fontSize: FONT_SIZE_MD,
+    fontFamily: FONT_REGULAR,
+    paddingVertical: 0,
+    paddingHorizontal: 0,
+  },
+  detailDivider: {
+    height: 1,
+    width: '100%',
+  },
+  detailTestButton: {
+    borderRadius: 16,
+    paddingVertical: 14,
+    alignItems: 'center',
+  },
+  detailTestButtonPressed: {
+    opacity: 0.8,
+    transform: [{ scale: 0.98 }],
+  },
+  detailTestButtonLabel: {
+    color: '#FFFFFF',
+    fontSize: FONT_SIZE_MD,
+    fontWeight: '600',
+    fontFamily: FONT_MEDIUM,
+  },
   onboardingBackdrop: {
     ...StyleSheet.absoluteFillObject,
     justifyContent: 'center',
@@ -2042,6 +2822,7 @@ const styles = StyleSheet.create({
   onboardingCard: {
     borderRadius: 18,
     borderWidth: 1,
+    overflow: 'hidden',
     padding: 18,
     gap: 12,
     shadowOpacity: 0.06,
@@ -2049,13 +2830,13 @@ const styles = StyleSheet.create({
     shadowOffset: { width: 0, height: 8 },
   },
   onboardingTitle: {
-    fontSize: 20,
+    fontSize: FONT_SIZE_XL,
     fontWeight: '700',
     fontFamily: FONT_BOLD,
   },
   onboardingText: {
-    fontSize: 13,
-    lineHeight: 18,
+    fontSize: FONT_SIZE_SM,
+    lineHeight: 20,
   },
   onboardingButton: {
     borderRadius: 12,
@@ -2065,7 +2846,7 @@ const styles = StyleSheet.create({
   },
   onboardingButtonLabel: {
     color: '#FFFFFF',
-    fontSize: 14,
+    fontSize: FONT_SIZE_SM,
     fontWeight: '700',
     fontFamily: FONT_BOLD,
   },
@@ -2075,6 +2856,7 @@ const styles = StyleSheet.create({
     paddingBottom: 24,
     borderTopLeftRadius: 20,
     borderTopRightRadius: 20,
+    overflow: 'hidden',
   },
   sheetHeader: {
     flexDirection: 'row',
@@ -2083,47 +2865,62 @@ const styles = StyleSheet.create({
     paddingBottom: 8,
   },
   sheetTitle: {
-    fontSize: 16,
+    fontSize: FONT_SIZE_MD,
     fontWeight: '600',
   },
   sheetDone: {
-    fontSize: 16,
+    fontSize: FONT_SIZE_MD,
     fontWeight: '600',
   },
   tabBar: {
-    flexDirection: 'row',
     borderTopWidth: 0,
     height: TAB_BAR_HEIGHT,
-    shadowOpacity: 0.08,
-    shadowRadius: 12,
-    shadowOffset: { width: 0, height: -4 },
-    elevation: 8,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingTop: 8,
+  },
+  tabPill: {
+    minWidth: 350,
+    paddingVertical: 10,
+    paddingHorizontal: 26,
+    borderRadius: 28,
+    borderWidth: 1,
+    overflow: 'hidden',
+    shadowOpacity: 0.18,
+    shadowRadius: 16,
+    shadowOffset: { width: 0, height: 8 },
+    elevation: 10,
+  },
+  tabPillContent: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 18,
   },
   tabButton: {
     flex: 1,
     alignItems: 'center',
     justifyContent: 'center',
     gap: 4,
-    paddingTop: 20,
-    paddingBottom: 0,
+    paddingVertical: 6,
   },
   tabIcon: {
     height: 25,
-    marginTop: 6,
+    marginTop: 2,
   },
   tabLabel: {
-    fontSize: 12,
+    fontSize: FONT_SIZE_XS,
     fontWeight: '600',
     fontFamily: FONT_MEDIUM,
   },
 });
 
 const lightColors = {
-  background: '#F0F4EF',
+  background: '#E3ECE1',
   card: '#FAFDF9',
   textPrimary: '#1C2B1A',
-  textSecondary: '#4A5F47',
-  textMuted: '#7A8F77',
+  textSecondary: '#1C2B1A',
+  textMuted: '#1C2B1A',
   label: '#1C2B1A',
   inputBackground: '#E8F0E6',
   inputText: '#1C2B1A',
@@ -2141,8 +2938,8 @@ const lightColors = {
 };
 
 const darkColors = {
-  background: '#000000',
-  card: '#16181C',
+  background: '#1C1C1E',
+  card: '#2A2A2C',
   textPrimary: '#E7E9EA',
   textSecondary: '#71767B',
   textMuted: '#536471',
@@ -2159,6 +2956,6 @@ const darkColors = {
   sheet: '#16181C',
   sheetBackdrop: 'rgba(91, 112, 131, 0.4)',
   remove: '#F4212E',
-  border: '#2F3336',
+  border: '#242427',
 };
 

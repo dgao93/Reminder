@@ -4,6 +4,7 @@ import {
   Animated,
   InteractionManager,
   Keyboard,
+  Platform,
   Pressable,
   ScrollView,
   StyleSheet,
@@ -64,7 +65,7 @@ const FONT_SIZE_MD = 16;
 const FONT_SIZE_LG = 18;
 const FONT_SIZE_XL = 20;
 const FONT_SIZE_TITLE = 34;
-const FONT_SIZE_DISPLAY = 44;
+const FONT_SIZE_DISPLAY = 36;
 const TAB_BAR_HEIGHT = 56;
 const DEFAULT_QUIET_HOURS: QuietHours = {
   enabled: false,
@@ -79,8 +80,8 @@ type ScheduleResult = { count: number; error?: string };
 const SCHEDULE_TYPE_OPTIONS: Array<{ value: ScheduleType; label: string; helper: string }> = [
   {
     value: 'withinDay',
-    label: 'Interval',
-    helper: 'Multiple reminders between a start and end time.',
+    label: 'Intraday',
+    helper: 'Multiple reminders within a start and end time.',
   },
   {
     value: 'daily',
@@ -276,7 +277,11 @@ function AppContent() {
   const [keyboardHeight, setKeyboardHeight] = useState(0);
   const [dayOfMonthDrafts, setDayOfMonthDrafts] = useState<Record<string, string>>({});
   const [headerHeight, setHeaderHeight] = useState(0);
+  const [settingsHeaderHeight, setSettingsHeaderHeight] = useState(0);
   const scrollY = useRef(new Animated.Value(0)).current;
+  const settingsScrollY = useRef(new Animated.Value(0)).current;
+  const [scrollViewHeight, setScrollViewHeight] = useState(0);
+  const [scrollContentHeight, setScrollContentHeight] = useState(0);
 
   useEffect(() => {
     if (activeTab === 'home') {
@@ -1130,6 +1135,30 @@ function AppContent() {
 
   const fadeHeight = Math.max(45, Math.round(windowHeight * 0.075));
   const hasSchedules = schedules.length > 0;
+  const scheduleIndexById = new Map(schedules.map((schedule, index) => [schedule.id, index]));
+  const scheduleSections = [
+    {
+      key: 'withinDay',
+      label: 'Intraday',
+      items: schedules.filter((schedule) => getScheduleType(schedule.type) === 'withinDay'),
+    },
+    {
+      key: 'daily',
+      label: 'Daily',
+      items: schedules.filter((schedule) => getScheduleType(schedule.type) === 'daily'),
+    },
+    {
+      key: 'weekly',
+      label: 'Weekly',
+      items: schedules.filter((schedule) => getScheduleType(schedule.type) === 'weekly'),
+    },
+    {
+      key: 'monthly',
+      label: 'Monthly',
+      items: schedules.filter((schedule) => getScheduleType(schedule.type) === 'monthly'),
+    },
+  ];
+  const scrollFlexGrow = Platform.OS === 'ios' ? 1 : hasSchedules ? 0 : 1;
   const fadeColors = [
     withAlpha(colors.background, 1),
     withAlpha(colors.background, 0.55),
@@ -1146,10 +1175,11 @@ function AppContent() {
   const glassSheet = withAlpha(colors.sheet, colorScheme === 'dark' ? 0.55 : 0.8);
   const glassBorder = withAlpha(colors.border, colorScheme === 'dark' ? 0.7 : 0.6);
   const headerButtonBorder = withAlpha(colors.shadow, colorScheme === 'dark' ? 0.6 : 0.35);
-  const glassHeader = withAlpha(colors.background, colorScheme === 'dark' ? 0.6 : 0.75);
   const glassHighlightStrong = withAlpha('#FFFFFF', colorScheme === 'dark' ? 0.12 : 0.28);
   const glassHighlightSoft = withAlpha('#FFFFFF', colorScheme === 'dark' ? 0.04 : 0.12);
   const glassHighlightFade = withAlpha('#FFFFFF', 0);
+  const backgroundGradient = [colors.card, colors.inputBackground, colors.background];
+  const backgroundGradientLocations = [0, 0.5, 1];
   const contentBottomPadding = keyboardHeight > 0 ? 0 : TAB_BAR_HEIGHT + insets.bottom + 4;
   const detailScheduleType = detailSchedule ? getScheduleType(detailSchedule.type) : 'daily';
   const detailScheduleDays = detailSchedule
@@ -1167,6 +1197,15 @@ function AppContent() {
   const detailSheetHeight = Math.round(
     Math.min(windowHeight * 0.82, windowHeight - insets.top - 24) * 0.92
   );
+  const scrollPaddingTop = hasSchedules ? 18 : 0;
+  const scrollPaddingBottom = hasSchedules ? contentBottomPadding : 0;
+  const scrollOverflow = scrollContentHeight - scrollViewHeight;
+  const shouldSnapScroll =
+    scrollViewHeight > 0 &&
+    scrollContentHeight > 0 &&
+    scrollOverflow <= scrollPaddingTop + scrollPaddingBottom;
+  const iosSnapOffsets = Platform.OS === 'ios' && shouldSnapScroll ? [0] : undefined;
+  const iosSnapAlignment = Platform.OS === 'ios' && shouldSnapScroll ? 'start' : undefined;
 
   const updateScheduleType = (schedule: Schedule, nextType: ScheduleType) => {
     if (schedule.type === nextType) {
@@ -1196,6 +1235,11 @@ function AppContent() {
     });
   };
   const fadeOpacity = scrollY.interpolate({
+    inputRange: [12, 36],
+    outputRange: [0, 1],
+    extrapolate: 'clamp',
+  });
+  const settingsFadeOpacity = settingsScrollY.interpolate({
     inputRange: [12, 36],
     outputRange: [0, 1],
     extrapolate: 'clamp',
@@ -1242,37 +1286,30 @@ function AppContent() {
   };
 
   return (
-    <SafeAreaView edges={['top']} style={[styles.safeArea, { backgroundColor: colors.background }]}>
-      <StatusBar style={colorScheme === 'dark' ? 'light' : 'dark'} backgroundColor={colors.background} />
+    <SafeAreaView edges={['top']} style={styles.safeArea}>
+      <LinearGradient
+        colors={backgroundGradient}
+        locations={backgroundGradientLocations}
+        start={{ x: 0, y: 0 }}
+        end={{ x: 0, y: 1 }}
+        style={StyleSheet.absoluteFillObject}
+        pointerEvents="none"
+      />
+      <StatusBar
+        style={colorScheme === 'dark' ? 'light' : 'dark'}
+        backgroundColor="transparent"
+        translucent
+      />
       {activeTab === 'home' ? (
         <View style={styles.flex}>
         <View
           style={[
             styles.headerBar,
-            { backgroundColor: glassHeader, borderColor: glassBorder },
+            { borderColor: glassBorder },
           ]}
           onLayout={(event) => setHeaderHeight(event.nativeEvent.layout.height)}
         >
-          <BlurView
-            intensity={glassBlurIntensity}
-            tint={colorScheme === 'dark' ? 'dark' : 'light'}
-            style={[
-              StyleSheet.absoluteFillObject,
-              { borderBottomLeftRadius: 18, borderBottomRightRadius: 18 },
-            ]}
-            pointerEvents="none"
-          />
-          <LinearGradient
-            colors={[glassHighlightStrong, glassHighlightSoft, glassHighlightFade]}
-            locations={[0, 0.45, 1]}
-            start={{ x: 0, y: 0 }}
-            end={{ x: 0, y: 1 }}
-            style={[
-              StyleSheet.absoluteFillObject,
-              { borderBottomLeftRadius: 18, borderBottomRightRadius: 18 },
-            ]}
-            pointerEvents="none"
-          />
+          <Text style={[styles.title, { color: colors.textPrimary }]}>Reminders</Text>
           <View style={styles.headerActions}>
             <Pressable
               style={[
@@ -1300,18 +1337,16 @@ function AppContent() {
               <MaterialIcons name="add" size={22} color={colors.accent} />
             </Pressable>
           </View>
-          <Text style={[styles.title, { color: colors.textPrimary }]}>Reminders</Text>
         </View>
         <Animated.ScrollView
           style={styles.scroll}
           contentContainerStyle={[
             styles.container,
             {
-              backgroundColor: colors.background,
               paddingTop: hasSchedules ? 18 : 0,
               paddingBottom: hasSchedules ? contentBottomPadding : 0,
               minHeight: keyboardHeight > 0 ? 0 : '100%',
-              flexGrow: hasSchedules ? 0 : 1,
+              flexGrow: scrollFlexGrow,
               justifyContent: hasSchedules ? 'flex-start' : 'center',
             },
           ]}
@@ -1319,12 +1354,17 @@ function AppContent() {
           keyboardDismissMode="interactive"
           contentInsetAdjustmentBehavior="always"
           automaticallyAdjustKeyboardInsets
+          alwaysBounceVertical
+          snapToOffsets={iosSnapOffsets}
+          snapToAlignment={iosSnapAlignment}
           showsVerticalScrollIndicator={false}
           scrollEventThrottle={16}
           onScroll={Animated.event(
             [{ nativeEvent: { contentOffset: { y: scrollY } } }],
             { useNativeDriver: true }
           )}
+          onLayout={(event) => setScrollViewHeight(event.nativeEvent.layout.height)}
+          onContentSizeChange={(_, height) => setScrollContentHeight(height)}
         >
           {!hasSchedules ? (
             <View style={styles.emptyState}>
@@ -1343,117 +1383,154 @@ function AppContent() {
           ) : null}
 
           {hasSchedules ? (
-            <View
-              style={[
-                styles.alarmList,
-                {
-                  backgroundColor: glassCard,
-                  borderColor: glassBorder,
-                  shadowColor: colors.shadow,
-                },
-              ]}
-            >
-              <BlurView
-                intensity={glassBlurIntensity}
-                tint={colorScheme === 'dark' ? 'dark' : 'light'}
-                style={[StyleSheet.absoluteFillObject, { borderRadius: 22 }]}
-                pointerEvents="none"
-              />
-              <LinearGradient
-                colors={[glassHighlightStrong, glassHighlightSoft, glassHighlightFade]}
-                locations={[0, 0.5, 1]}
-                start={{ x: 0, y: 0 }}
-                end={{ x: 0, y: 1 }}
-                style={[StyleSheet.absoluteFillObject, { borderRadius: 22 }]}
-                pointerEvents="none"
-              />
-              {schedules.map((schedule, index) => {
-                const scheduleType = getScheduleType(schedule.type);
-                const startLabel = formatTime(schedule.startMinutesFromMidnight);
-                const daysOfWeek = normalizeDaysOfWeek(schedule.daysOfWeek);
-                const dayOfMonth = normalizeDayOfMonth(schedule.dayOfMonth);
-                const timeSummary =
-                  scheduleType === 'withinDay'
-                    ? formatTimeRangeSummary(
-                        schedule.startMinutesFromMidnight,
-                        schedule.endMinutesFromMidnight
-                      )
-                    : startLabel;
-                const summary =
-                  scheduleType === 'withinDay'
-                    ? `${formatDaysSummary(daysOfWeek)} • ${timeSummary} • Every ${schedule.intervalMinutes} min`
-                    : scheduleType === 'daily'
-                      ? 'Daily'
-                      : scheduleType === 'weekly'
-                        ? `Weekly • ${formatWeeklyDaysSummary(daysOfWeek)}`
-                        : `Monthly • ${formatDayOfMonthLabel(dayOfMonth)}`;
-                const scheduleDisplayName =
-                  schedule.name?.trim() || getDefaultNotificationName(index);
-                const isLast = index === schedules.length - 1;
-                return (
-                  <View
-                    key={schedule.id}
-                    style={[
-                      styles.alarmRow,
-                      !isLast && { borderBottomColor: colors.border, borderBottomWidth: 1 },
-                    ]}
-                  >
-                    {isListEditing ? (
-                      <Pressable
-                        style={styles.alarmDelete}
-                        onPress={() => void removeSchedule(schedule.id)}
-                        accessibilityRole="button"
-                        accessibilityLabel={`Delete ${scheduleDisplayName}`}
-                      >
-                        <View style={[styles.alarmDeleteBadge, { backgroundColor: colors.remove }]}>
-                          <Text style={styles.alarmDeleteText}>-</Text>
-                        </View>
-                      </Pressable>
-                    ) : null}
-                    <Pressable
-                      style={styles.alarmRowMain}
-                      onPress={() => openScheduleDetail(schedule.id)}
-                      accessibilityRole="button"
-                      accessibilityLabel={`Edit ${scheduleDisplayName}`}
+            <View style={styles.alarmSections}>
+              {scheduleSections
+                .filter((section) => section.items.length > 0)
+                .map((section) => (
+                  <View key={section.key} style={styles.alarmSection}>
+                    <Text style={[styles.alarmSectionTitle, { color: colors.textSecondary }]}>
+                      {section.label}
+                    </Text>
+                    <View
+                      style={[
+                        styles.alarmList,
+                        {
+                          backgroundColor: glassCard,
+                          borderColor: glassBorder,
+                          shadowColor: colors.shadow,
+                        },
+                      ]}
                     >
-                      <Text style={[styles.alarmTime, { color: colors.textPrimary }]}>
-                        {startLabel}
-                      </Text>
-                      <Text style={[styles.alarmLabel, { color: colors.textSecondary }]}>
-                        {scheduleDisplayName}
-                      </Text>
-                      <Text style={[styles.alarmSubtext, { color: colors.textMuted }]}>
-                        {summary}
-                      </Text>
-                    </Pressable>
-                    {!isListEditing ? (
-                      <Switch
-                        value={schedule.isActive}
-                        onValueChange={(value) =>
-                          value ? void onStartSchedule(schedule.id) : void onStopSchedule(schedule.id)
-                        }
-                        trackColor={{ false: colors.border, true: colors.accent }}
-                        ios_backgroundColor={colors.border}
+                      <BlurView
+                        intensity={glassBlurIntensity}
+                        tint={colorScheme === 'dark' ? 'dark' : 'light'}
+                        style={[StyleSheet.absoluteFillObject, { borderRadius: 22 }]}
+                        pointerEvents="none"
                       />
-                    ) : null}
+                      {section.items.map((schedule, sectionIndex) => {
+                        const scheduleType = getScheduleType(schedule.type);
+                        const startLabel = formatTime(schedule.startMinutesFromMidnight);
+                        const daysOfWeek = normalizeDaysOfWeek(schedule.daysOfWeek);
+                        const dayOfMonth = normalizeDayOfMonth(schedule.dayOfMonth);
+                        const daysSummary = formatDaysSummary(daysOfWeek);
+                        const hasSomeDays = daysOfWeek.some(Boolean);
+                        const isFullWeek = daysOfWeek.every(Boolean);
+                        const timeSummary =
+                          scheduleType === 'withinDay'
+                            ? formatTimeRangeSummary(
+                                schedule.startMinutesFromMidnight,
+                                schedule.endMinutesFromMidnight
+                              )
+                            : startLabel;
+                        const summaryLines =
+                          scheduleType === 'withinDay'
+                            ? hasSomeDays && !isFullWeek
+                              ? [
+                                  daysSummary,
+                                  `${timeSummary} • Every ${schedule.intervalMinutes} min`,
+                                ]
+                              : [
+                                  `${daysSummary} • ${timeSummary} • Every ${schedule.intervalMinutes} min`,
+                                ]
+                            : scheduleType === 'daily'
+                              ? ['Daily']
+                              : scheduleType === 'weekly'
+                                ? [`Weekly • ${formatWeeklyDaysSummary(daysOfWeek)}`]
+                                : [`Monthly • ${formatDayOfMonthLabel(dayOfMonth)}`];
+                        const displayTime = scheduleType === 'withinDay' ? timeSummary : startLabel;
+                        const scheduleIndex = scheduleIndexById.get(schedule.id) ?? sectionIndex;
+                        const scheduleDisplayName =
+                          schedule.name?.trim() || getDefaultNotificationName(scheduleIndex);
+                        const isLast = sectionIndex === section.items.length - 1;
+                        return (
+                          <View
+                            key={schedule.id}
+                            style={[
+                              styles.alarmRow,
+                              !isLast && { borderBottomColor: colors.border, borderBottomWidth: 1 },
+                            ]}
+                          >
+                            {isListEditing ? (
+                              <Pressable
+                                style={styles.alarmDelete}
+                                onPress={() => void removeSchedule(schedule.id)}
+                                accessibilityRole="button"
+                                accessibilityLabel={`Delete ${scheduleDisplayName}`}
+                              >
+                                <View
+                                  style={[
+                                    styles.alarmDeleteBadge,
+                                    { backgroundColor: colors.remove },
+                                  ]}
+                                >
+                                  <Text style={styles.alarmDeleteText}>-</Text>
+                                </View>
+                              </Pressable>
+                            ) : null}
+                            <Pressable
+                              style={styles.alarmRowMain}
+                              onPress={() => openScheduleDetail(schedule.id)}
+                              accessibilityRole="button"
+                              accessibilityLabel={`Edit ${scheduleDisplayName}`}
+                            >
+                              <Text style={[styles.alarmTime, { color: colors.textPrimary }]}>
+                                {scheduleDisplayName}
+                              </Text>
+                              <Text style={[styles.alarmLabel, { color: colors.textSecondary }]}>
+                                {displayTime}
+                              </Text>
+                              {summaryLines.length === 1 ? (
+                                <Text style={[styles.alarmSubtext, { color: colors.textMuted }]}>
+                                  {summaryLines[0]}
+                                </Text>
+                              ) : (
+                                <View style={styles.alarmSubtextGroup}>
+                                  {summaryLines.map((line, lineIndex) => (
+                                    <Text
+                                      key={`${schedule.id}-summary-${lineIndex}`}
+                                      style={[styles.alarmSubtext, { color: colors.textMuted }]}
+                                    >
+                                      {line}
+                                    </Text>
+                                  ))}
+                                </View>
+                              )}
+                            </Pressable>
+                            {!isListEditing ? (
+                              <View style={styles.alarmToggle}>
+                                <Switch
+                                  value={schedule.isActive}
+                                  onValueChange={(value) =>
+                                    value
+                                      ? void onStartSchedule(schedule.id)
+                                      : void onStopSchedule(schedule.id)
+                                  }
+                                  trackColor={{ false: colors.border, true: colors.accent }}
+                                  ios_backgroundColor={colors.border}
+                                />
+                              </View>
+                            ) : null}
+                          </View>
+                        );
+                      })}
+                    </View>
                   </View>
-                );
-              })}
+                ))}
             </View>
           ) : null}
 
         </Animated.ScrollView>
-        <Animated.View
-          pointerEvents="none"
-          style={[
-            styles.topFade,
-            {
-              top: headerHeight,
-              height: fadeHeight,
-              opacity: fadeOpacity,
-            },
-          ]}
-        >
+      <Animated.View
+        pointerEvents="none"
+        style={[
+          styles.topFade,
+          {
+            top: headerHeight,
+            height: fadeHeight,
+            opacity: fadeOpacity,
+          },
+        ]}
+      >
           <LinearGradient
             colors={fadeColors}
             locations={fadeLocations}
@@ -1482,108 +1559,141 @@ function AppContent() {
         </View>
       </View>
       ) : (
-        <ScrollView
-          style={styles.scroll}
-          contentContainerStyle={[styles.settingsContainer, { backgroundColor: colors.background }]}
-          contentInsetAdjustmentBehavior="always"
-          keyboardShouldPersistTaps="handled"
-          showsVerticalScrollIndicator={false}
-        >
-          <Text style={[styles.title, { color: colors.textPrimary }]}>Settings</Text>
+        <View style={styles.flex}>
           <View
+            style={[styles.headerBar, { borderColor: glassBorder }]}
+            onLayout={(event) => setSettingsHeaderHeight(event.nativeEvent.layout.height)}
+          >
+            <Text style={[styles.title, { color: colors.textPrimary }]}>Settings</Text>
+          </View>
+          <Animated.ScrollView
+            style={styles.scroll}
+            contentContainerStyle={styles.settingsContainer}
+            contentInsetAdjustmentBehavior="always"
+            keyboardShouldPersistTaps="handled"
+            showsVerticalScrollIndicator={false}
+            scrollEventThrottle={16}
+            onScroll={Animated.event(
+              [{ nativeEvent: { contentOffset: { y: settingsScrollY } } }],
+              { useNativeDriver: true }
+            )}
+          >
+            <View
+              style={[
+                styles.card,
+                {
+                  backgroundColor: glassCard,
+                  shadowColor: colors.shadow,
+                  borderColor: glassBorder,
+                },
+              ]}
+            >
+              <BlurView
+                intensity={glassBlurIntensity}
+                tint={colorScheme === 'dark' ? 'dark' : 'light'}
+                style={[StyleSheet.absoluteFillObject, { borderRadius: 20 }]}
+                pointerEvents="none"
+              />
+              <View style={styles.settingsRow}>
+                <View style={styles.settingsText}>
+                  <Text style={[styles.settingsLabel, { color: colors.textPrimary }]}>
+                    Dark mode
+                  </Text>
+                  <Text style={[styles.settingsHelper, { color: colors.textSecondary }]}>
+                    Use the dark color theme.
+                  </Text>
+                </View>
+                <Switch
+                  value={darkModeDraft}
+                  onValueChange={onToggleDarkMode}
+                  trackColor={{ false: colors.border, true: colors.accent }}
+                  ios_backgroundColor={colors.border}
+                />
+              </View>
+            </View>
+            <View
+              style={[
+                styles.card,
+                {
+                  backgroundColor: glassCard,
+                  shadowColor: colors.shadow,
+                  borderColor: glassBorder,
+                },
+              ]}
+            >
+              <BlurView
+                intensity={glassBlurIntensity}
+                tint={colorScheme === 'dark' ? 'dark' : 'light'}
+                style={[StyleSheet.absoluteFillObject, { borderRadius: 20 }]}
+                pointerEvents="none"
+              />
+              <View style={styles.settingsRow}>
+                <View style={styles.settingsText}>
+                  <Text style={[styles.settingsLabel, { color: colors.textPrimary }]}>
+                    Quiet hours
+                  </Text>
+                  <Text style={[styles.settingsHelper, { color: colors.textSecondary }]}>
+                    Mute alerts during the hours you choose.
+                  </Text>
+                </View>
+                <Switch
+                  value={quietHours.enabled}
+                  onValueChange={(value) => updateQuietHours({ enabled: value })}
+                  trackColor={{ false: colors.border, true: colors.accent }}
+                  ios_backgroundColor={colors.border}
+                />
+              </View>
+              <View style={styles.timeRowGroup}>
+                <Pressable
+                  style={[
+                    styles.timeRow,
+                    { backgroundColor: colors.inputBackground, borderColor: colors.border },
+                  ]}
+                  onPress={() => setActivePicker({ scheduleId: 'quiet', kind: 'start' })}
+                >
+                  <Text style={[styles.timeLabel, { color: colors.label }]}>Start</Text>
+                  <Text style={[styles.timeValue, { color: colors.textPrimary }]}>
+                    {formatTime(quietHours.startMinutesFromMidnight)}
+                  </Text>
+                </Pressable>
+                <Pressable
+                  style={[
+                    styles.timeRow,
+                    { backgroundColor: colors.inputBackground, borderColor: colors.border },
+                  ]}
+                  onPress={() => setActivePicker({ scheduleId: 'quiet', kind: 'end' })}
+                >
+                  <Text style={[styles.timeLabel, { color: colors.label }]}>End</Text>
+                  <Text style={[styles.timeValue, { color: colors.textPrimary }]}>
+                    {formatTime(quietHours.endMinutesFromMidnight)}
+                  </Text>
+                </Pressable>
+              </View>
+              <Text style={[styles.helperText, { color: colors.textMuted }]}>
+                Alerts that fall inside this window will be skipped.
+              </Text>
+            </View>
+          </Animated.ScrollView>
+          <Animated.View
+            pointerEvents="none"
             style={[
-              styles.card,
+              styles.topFade,
               {
-                backgroundColor: glassCard,
-                shadowColor: colors.shadow,
-                borderColor: glassBorder,
+                top: settingsHeaderHeight,
+                height: fadeHeight,
+                opacity: settingsFadeOpacity,
               },
             ]}
           >
-            <BlurView
-              intensity={glassBlurIntensity}
-              tint={colorScheme === 'dark' ? 'dark' : 'light'}
-              style={[StyleSheet.absoluteFillObject, { borderRadius: 20 }]}
-              pointerEvents="none"
+            <LinearGradient
+              colors={fadeColors}
+              locations={fadeLocations}
+              start={{ x: 0, y: 0 }}
+              end={{ x: 0, y: 1 }}
+              style={StyleSheet.absoluteFillObject}
             />
-            <View style={styles.settingsRow}>
-              <View style={styles.settingsText}>
-                <Text style={[styles.settingsLabel, { color: colors.textPrimary }]}>Dark mode</Text>
-                <Text style={[styles.settingsHelper, { color: colors.textSecondary }]}>
-                  Use the dark color theme.
-                </Text>
-              </View>
-              <Switch
-                value={darkModeDraft}
-                onValueChange={onToggleDarkMode}
-                trackColor={{ false: colors.border, true: colors.accent }}
-                ios_backgroundColor={colors.border}
-              />
-            </View>
-          </View>
-          <View
-            style={[
-              styles.card,
-              {
-                backgroundColor: glassCard,
-                shadowColor: colors.shadow,
-                borderColor: glassBorder,
-              },
-            ]}
-          >
-            <BlurView
-              intensity={glassBlurIntensity}
-              tint={colorScheme === 'dark' ? 'dark' : 'light'}
-              style={[StyleSheet.absoluteFillObject, { borderRadius: 20 }]}
-              pointerEvents="none"
-            />
-            <View style={styles.settingsRow}>
-              <View style={styles.settingsText}>
-                <Text style={[styles.settingsLabel, { color: colors.textPrimary }]}>
-                  Quiet hours
-                </Text>
-                <Text style={[styles.settingsHelper, { color: colors.textSecondary }]}>
-                  Mute alerts during the hours you choose.
-                </Text>
-              </View>
-              <Switch
-                value={quietHours.enabled}
-                onValueChange={(value) => updateQuietHours({ enabled: value })}
-                trackColor={{ false: colors.border, true: colors.accent }}
-                ios_backgroundColor={colors.border}
-              />
-            </View>
-            <View style={styles.timeRowGroup}>
-              <Pressable
-                style={[
-                  styles.timeRow,
-                  { backgroundColor: colors.inputBackground, borderColor: colors.border },
-                ]}
-                onPress={() => setActivePicker({ scheduleId: 'quiet', kind: 'start' })}
-              >
-                <Text style={[styles.timeLabel, { color: colors.label }]}>Start</Text>
-                <Text style={[styles.timeValue, { color: colors.textPrimary }]}>
-                  {formatTime(quietHours.startMinutesFromMidnight)}
-                </Text>
-              </Pressable>
-              <Pressable
-                style={[
-                  styles.timeRow,
-                  { backgroundColor: colors.inputBackground, borderColor: colors.border },
-                ]}
-                onPress={() => setActivePicker({ scheduleId: 'quiet', kind: 'end' })}
-              >
-                <Text style={[styles.timeLabel, { color: colors.label }]}>End</Text>
-                <Text style={[styles.timeValue, { color: colors.textPrimary }]}>
-                  {formatTime(quietHours.endMinutesFromMidnight)}
-                </Text>
-              </Pressable>
-            </View>
-            <Text style={[styles.helperText, { color: colors.textMuted }]}>
-              Alerts that fall inside this window will be skipped.
-            </Text>
-          </View>
-        </ScrollView>
+          </Animated.View>
+        </View>
       )}
 
       <View
@@ -1750,50 +1860,48 @@ function AppContent() {
                 <Text style={[styles.detailSectionTitle, { color: colors.textSecondary }]}>
                   Time
                 </Text>
-                <Pressable
+                <View
                   style={[
-                    styles.timeRow,
-                    {
-                      backgroundColor: glassCard,
-                      borderColor: glassBorder,
-                      borderWidth: 1,
-                    },
+                    styles.detailTimeGroup,
+                    { backgroundColor: glassCard, borderColor: glassBorder },
                   ]}
-                  onPress={() =>
-                    setActivePicker({ scheduleId: detailSchedule.id, kind: 'start' })
-                  }
-                  accessibilityRole="button"
-                  accessibilityLabel="Choose start time"
                 >
-                  <Text style={[styles.timeLabel, { color: colors.textPrimary }]}>
-                    {detailScheduleType === 'withinDay' ? 'Start' : 'Time'}
-                  </Text>
-                  <Text style={[styles.timeValue, { color: colors.textPrimary }]}>
-                    {formatTime(detailSchedule.startMinutesFromMidnight)}
-                  </Text>
-                </Pressable>
-                {detailScheduleType === 'withinDay' ? (
                   <Pressable
-                    style={[
-                      styles.timeRow,
-                      {
-                        backgroundColor: glassCard,
-                        borderColor: glassBorder,
-                        borderWidth: 1,
-                      },
-                    ]}
+                    style={styles.timeRow}
                     onPress={() =>
-                      setActivePicker({ scheduleId: detailSchedule.id, kind: 'end' })
+                      setActivePicker({ scheduleId: detailSchedule.id, kind: 'start' })
                     }
                     accessibilityRole="button"
-                    accessibilityLabel="Choose end time"
+                    accessibilityLabel="Choose start time"
                   >
-                    <Text style={[styles.timeLabel, { color: colors.textPrimary }]}>End</Text>
+                    <Text style={[styles.timeLabel, { color: colors.textPrimary }]}>
+                      {detailScheduleType === 'withinDay' ? 'Start' : 'Time'}
+                    </Text>
                     <Text style={[styles.timeValue, { color: colors.textPrimary }]}>
-                      {formatTime(detailSchedule.endMinutesFromMidnight)}
+                      {formatTime(detailSchedule.startMinutesFromMidnight)}
                     </Text>
                   </Pressable>
-                ) : null}
+                  {detailScheduleType === 'withinDay' ? (
+                    <>
+                      <View
+                        style={[styles.detailTimeDivider, { backgroundColor: colors.border }]}
+                      />
+                      <Pressable
+                        style={styles.timeRow}
+                        onPress={() =>
+                          setActivePicker({ scheduleId: detailSchedule.id, kind: 'end' })
+                        }
+                        accessibilityRole="button"
+                        accessibilityLabel="Choose end time"
+                      >
+                        <Text style={[styles.timeLabel, { color: colors.textPrimary }]}>End</Text>
+                        <Text style={[styles.timeValue, { color: colors.textPrimary }]}>
+                          {formatTime(detailSchedule.endMinutesFromMidnight)}
+                        </Text>
+                      </Pressable>
+                    </>
+                  ) : null}
+                </View>
               </View>
 
               <View
@@ -1999,18 +2107,18 @@ function AppContent() {
                 ) : null}
               </View>
 
-              <Pressable
-                style={({ pressed }) => [
-                  styles.detailTestButton,
-                  { backgroundColor: colors.accent },
-                  pressed && styles.detailTestButtonPressed,
-                ]}
-                onPress={() => void sendTestNotification(detailSchedule)}
-                accessibilityRole="button"
-                accessibilityLabel="Test notification"
-              >
-                <Text style={styles.detailTestButtonLabel}>Test notification</Text>
-              </Pressable>
+              <View style={styles.detailTestRow}>
+                <Pressable
+                  onPress={() => void sendTestNotification(detailSchedule)}
+                  accessibilityRole="button"
+                  accessibilityLabel="Test notification"
+                  hitSlop={8}
+                >
+                  <Text style={[styles.detailTestLink, { color: colors.textSecondary }]}>
+                    Send test notification
+                  </Text>
+                </Pressable>
+              </View>
               </Reanimated.ScrollView>
             </Reanimated.View>
           </GestureDetector>
@@ -2154,7 +2262,7 @@ const styles = StyleSheet.create({
   },
   settingsLabel: {
     fontSize: FONT_SIZE_MD,
-    fontWeight: '600',
+    fontWeight: '700',
     fontFamily: FONT_BOLD,
   },
   settingsHelper: {
@@ -2170,13 +2278,13 @@ const styles = StyleSheet.create({
   },
   title: {
     fontSize: FONT_SIZE_TITLE,
-    fontWeight: '800',
+    fontWeight: '700',
     fontFamily: FONT_BOLD,
     letterSpacing: -0.5,
   },
   headerBar: {
     paddingHorizontal: 18,
-    paddingTop: 12,
+    paddingTop: 18,
     paddingBottom: 8,
     gap: 10,
     borderBottomLeftRadius: 18,
@@ -2198,7 +2306,7 @@ const styles = StyleSheet.create({
   },
   headerActionText: {
     fontSize: FONT_SIZE_MD,
-    fontWeight: '600',
+    fontWeight: '700',
     fontFamily: FONT_MEDIUM,
   },
   alarmList: {
@@ -2221,20 +2329,41 @@ const styles = StyleSheet.create({
     flex: 1,
     gap: 4,
   },
+  alarmSections: {
+    gap: 12,
+  },
+  alarmSection: {
+    gap: 8,
+  },
+  alarmSectionTitle: {
+    fontSize: FONT_SIZE_SM,
+    fontWeight: '700',
+    fontFamily: FONT_BOLD,
+    letterSpacing: 1,
+    textTransform: 'uppercase',
+  },
+  alarmToggle: {
+    alignSelf: 'stretch',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
   alarmTime: {
-    fontSize: FONT_SIZE_DISPLAY,
-    fontWeight: '300',
+    fontSize: FONT_SIZE_LG,
+    fontWeight: '700',
     fontFamily: FONT_REGULAR,
     letterSpacing: -0.6,
   },
   alarmLabel: {
     fontSize: FONT_SIZE_MD,
-    fontWeight: '600',
+    fontWeight: '700',
     fontFamily: FONT_MEDIUM,
   },
   alarmSubtext: {
     fontSize: FONT_SIZE_SM,
     fontFamily: FONT_REGULAR,
+  },
+  alarmSubtextGroup: {
+    gap: 2,
   },
   alarmDelete: {
     paddingRight: 4,
@@ -2277,10 +2406,10 @@ const styles = StyleSheet.create({
     gap: 16,
     borderWidth: 1,
     overflow: 'hidden',
-    shadowOpacity: 0.08,
-    shadowRadius: 20,
-    shadowOffset: { width: 0, height: 4 },
-    elevation: 8,
+    shadowOpacity: 0.16,
+    shadowRadius: 24,
+    shadowOffset: { width: 0, height: 10 },
+    elevation: 12,
   },
   cardHeader: {
     flexDirection: 'row',
@@ -2302,7 +2431,7 @@ const styles = StyleSheet.create({
   },
   cardTitleInput: {
     fontSize: FONT_SIZE_LG,
-    fontWeight: '600',
+    fontWeight: '700',
     fontFamily: FONT_BOLD,
     flex: 1,
     marginRight: 12,
@@ -2331,7 +2460,7 @@ const styles = StyleSheet.create({
   },
   menuLabel: {
     fontSize: FONT_SIZE_XL,
-    fontWeight: '600',
+    fontWeight: '700',
     fontFamily: FONT_BOLD,
     letterSpacing: 1,
   },
@@ -2399,12 +2528,12 @@ const styles = StyleSheet.create({
     paddingVertical: 8,
     paddingHorizontal: 10,
     fontSize: FONT_SIZE_MD,
-    fontWeight: '600',
+    fontWeight: '700',
     fontFamily: FONT_MEDIUM,
   },
   intervalUnit: {
     fontSize: FONT_SIZE_SM,
-    fontWeight: '600',
+    fontWeight: '700',
     fontFamily: FONT_MEDIUM,
   },
   stepperButton: {
@@ -2427,7 +2556,7 @@ const styles = StyleSheet.create({
   },
   intervalValue: {
     fontSize: FONT_SIZE_MD,
-    fontWeight: '600',
+    fontWeight: '700',
     fontFamily: FONT_MEDIUM,
   },
   timeRow: {
@@ -2445,12 +2574,12 @@ const styles = StyleSheet.create({
   },
   timeLabel: {
     fontSize: FONT_SIZE_MD,
-    fontWeight: '600',
+    fontWeight: '700',
     fontFamily: FONT_MEDIUM,
   },
   timeValue: {
     fontSize: FONT_SIZE_MD,
-    fontWeight: '600',
+    fontWeight: '700',
     fontFamily: FONT_MEDIUM,
   },
   dayRow: {
@@ -2473,7 +2602,7 @@ const styles = StyleSheet.create({
   },
   dayLabel: {
     fontSize: FONT_SIZE_XS,
-    fontWeight: '600',
+    fontWeight: '700',
     fontFamily: FONT_BOLD,
   },
   helperText: {
@@ -2511,7 +2640,7 @@ const styles = StyleSheet.create({
   },
   messageLabel: {
     fontSize: FONT_SIZE_XS,
-    fontWeight: '600',
+    fontWeight: '700',
     fontFamily: FONT_MEDIUM,
   },
   messageInput: {
@@ -2565,7 +2694,7 @@ const styles = StyleSheet.create({
   },
   typeLabel: {
     fontSize: FONT_SIZE_XS,
-    fontWeight: '600',
+    fontWeight: '700',
     fontFamily: FONT_MEDIUM,
   },
   typeOptions: {
@@ -2609,7 +2738,7 @@ const styles = StyleSheet.create({
   },
   namePromptCancel: {
     fontSize: FONT_SIZE_MD,
-    fontWeight: '600',
+    fontWeight: '700',
     fontFamily: FONT_MEDIUM,
   },
   namePromptButton: {
@@ -2650,7 +2779,7 @@ const styles = StyleSheet.create({
   },
   menuItemText: {
     fontSize: FONT_SIZE_MD,
-    fontWeight: '600',
+    fontWeight: '700',
     fontFamily: FONT_BOLD,
   },
   menuCancel: {
@@ -2665,7 +2794,7 @@ const styles = StyleSheet.create({
   },
   menuCancelText: {
     fontSize: FONT_SIZE_MD,
-    fontWeight: '600',
+    fontWeight: '700',
     fontFamily: FONT_BOLD,
     textAlign: 'center',
   },
@@ -2761,6 +2890,15 @@ const styles = StyleSheet.create({
   detailPickerGroup: {
     gap: 12,
   },
+  detailTimeGroup: {
+    borderRadius: 18,
+    borderWidth: 1,
+    overflow: 'hidden',
+  },
+  detailTimeDivider: {
+    height: 1,
+    marginHorizontal: 16,
+  },
   detailSection: {
     borderRadius: 18,
     borderWidth: 1,
@@ -2770,7 +2908,7 @@ const styles = StyleSheet.create({
   },
   detailSectionTitle: {
     fontSize: FONT_SIZE_SM,
-    fontWeight: '600',
+    fontWeight: '700',
     fontFamily: FONT_MEDIUM,
   },
   detailSubsection: {
@@ -2784,7 +2922,7 @@ const styles = StyleSheet.create({
   },
   detailRowLabel: {
     fontSize: FONT_SIZE_MD,
-    fontWeight: '600',
+    fontWeight: '700',
     fontFamily: FONT_MEDIUM,
   },
   detailRowInput: {
@@ -2799,19 +2937,14 @@ const styles = StyleSheet.create({
     height: 1,
     width: '100%',
   },
-  detailTestButton: {
-    borderRadius: 16,
-    paddingVertical: 14,
-    alignItems: 'center',
+  detailTestRow: {
+    alignItems: 'flex-start',
+    paddingHorizontal: 4,
+    paddingTop: 4,
   },
-  detailTestButtonPressed: {
-    opacity: 0.8,
-    transform: [{ scale: 0.98 }],
-  },
-  detailTestButtonLabel: {
-    color: '#FFFFFF',
-    fontSize: FONT_SIZE_MD,
-    fontWeight: '600',
+  detailTestLink: {
+    fontSize: FONT_SIZE_SM,
+    fontWeight: '700',
     fontFamily: FONT_MEDIUM,
   },
   onboardingBackdrop: {
@@ -2866,11 +2999,11 @@ const styles = StyleSheet.create({
   },
   sheetTitle: {
     fontSize: FONT_SIZE_MD,
-    fontWeight: '600',
+    fontWeight: '700',
   },
   sheetDone: {
     fontSize: FONT_SIZE_MD,
-    fontWeight: '600',
+    fontWeight: '700',
   },
   tabBar: {
     borderTopWidth: 0,
@@ -2910,7 +3043,7 @@ const styles = StyleSheet.create({
   },
   tabLabel: {
     fontSize: FONT_SIZE_XS,
-    fontWeight: '600',
+    fontWeight: '700',
     fontFamily: FONT_MEDIUM,
   },
 });
@@ -2939,10 +3072,10 @@ const lightColors = {
 
 const darkColors = {
   background: '#1C1C1E',
-  card: '#2A2A2C',
+  card: '#464649',
   textPrimary: '#E7E9EA',
-  textSecondary: '#71767B',
-  textMuted: '#536471',
+  textSecondary: '#B0B3B8',
+  textMuted: '#8E9298',
   label: '#E7E9EA',
   inputBackground: '#202327',
   inputText: '#E7E9EA',
